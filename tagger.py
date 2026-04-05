@@ -27,7 +27,7 @@ SLEEP_BETWEEN_CALLS = 0.5  # seconds
 
 TAG_SYSTEM = (
     "You are a concise topic tagger for LinkedIn posts. "
-    "Given a post, return a JSON array of 3-5 short, lowercase topic tags. "
+    "Given a post, return a JSON array of 5 short, lowercase topic tags. "
     "Tags should be single words or short phrases (e.g. \"ai\", \"leadership\", "
     "\"startup advice\"). Return only the JSON array, no other text."
 )
@@ -68,6 +68,10 @@ def tag_post(client: anthropic.Anthropic, author_name: str, post_text: str) -> l
     )
 
     text = next((b.text for b in response.content if b.type == "text"), "[]")
+    # Strip markdown code fences if the model wrapped the JSON
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
 
     try:
         tags = json.loads(text)
