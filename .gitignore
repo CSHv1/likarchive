@@ -25,6 +25,7 @@ build/
 page_dump.html
 login_failed.png
 *.png
+NOTES.md
 
 # Logs
 *.log
@@ -36,6 +37,4 @@ sync.log
 
 # Claude Code internal
 .claude/
-
-# Playwright browser binaries
 .playwright/
