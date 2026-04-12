@@ -36,3 +36,6 @@ sync.log
 
 # Claude Code internal
 .claude/
+
+# Playwright browser binaries
+.playwright/
