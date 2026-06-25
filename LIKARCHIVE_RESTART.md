@@ -10,15 +10,17 @@ A local Python/Playwright scraper that logs into LinkedIn, navigates to the save
 
 **Built and working locally:**
 
-- `scraper.py` — Playwright login, saved-posts navigation, infinite-scroll pagination, extracts post text / author / URL / timestamp
-- `db.py` — SQLite with MD5 hash dedup (upsert if hash differs, skip if identical); FTS5 + tags schema
+- `scraper.py` — Playwright saved-posts navigation, infinite-scroll pagination, extracts post text / author / URL / timestamp (auth via persistent browser profile)
+- `save_session.py` — one-time manual login; saves browser profile to `browser_profile/`
+- `db.py` — SQLite with MD5 hash dedup; FTS5 + tags schema; `post_date` column (reconstructed from relative timestamps)
 - `query.py` — CLI browser with FTS5 search
 - `tagger.py` — auto-tagging via Claude Haiku (`claude-haiku-4-5-20251001`)
 - `scheduler.py` — daily sync
+- `app.py` + `templates/index.html` — Flask web UI: card list, tag/author/date filters, FTS search, load more pagination
 - `CLAUDE.md` — merged instructions + 8-phase roadmap
-- Test dataset capped at 50 posts locally
+- ~148 posts in local DB, all tagged
 
-**Stopped at:** end of the local core. Next planned build was Phase 3 (Flask GUI), then the cloud path (Phases 4–8).
+**Stopped at:** end of Phase 3 (Flask GUI). Next build is Phase 4 (Docker containerisation), then GCP infra (Phases 5–7).
 
 ## ⚠️ Known watch-point — check this FIRST
 
@@ -41,31 +43,25 @@ HEADLESS=false MAX_POSTS=5 python scraper.py
 - Headful, 5 posts, confirm text/author/URL/timestamp populate in SQLite.
 - Fix selectors if drifted. (Bonus: this reloads the whole codebase into my head.)
 
-### Step 2 — Pick ONE build to push next
+### Step 2 — Next build: Phase 4 (Containerisation)
 
-Two valid orders depending on what I'm optimising for:
+GUI is done (Phase 3 ✅). The next step is Docker + GCP (Phases 4–7):
+- Dockerfile: `python:3.11-slim`, `playwright install-deps chromium`, `HEADLESS=true` default
+- `.dockerignore`: exclude `.env`, `*.db`, `browser_profile/`, `__pycache__`, `.git`
+- Build and test locally: `docker build -t likarchive . && docker run --env-file .env likarchive`
+- GCP infra: dedicated SA, Secret Manager for creds, GCS for SQLite persistence (`db_sync.py`)
+- Cloud Run deploy + Cloud Scheduler daily trigger
 
-**Order A — job-search-optimal (recommended): ship to cloud first**
-The engineering *story* is a deployed, scheduled, cloud-native pipeline. Do Phases 4–6 next:
-- Containerise (Dockerfile, `playwright install chromium`, `HEADLESS=true` default)
-- GCP infra: dedicated SA, Secret Manager for creds, GCS as SQLite persistence
-- Cloud Run deploy (no public URL, scheduler-triggered, 2Gi mem, 900s timeout)
-- Cloud Scheduler daily trigger with OIDC
-Then do the GUI as polish.
-*Why:* "running headless on Cloud Run, daily schedule, secrets managed properly" is the sentence that anchors a Staff/Principal conversation. UI is nice-to-have.
-
-**Order B — motivation-optimal: GUI first (Phase 3)**
-Flask GUI — card layout, tag/author/date filters, FTS search, manual tagging.
-*Why:* turns it from "a script" into "a thing I can see," which may be what keeps momentum alive tonight. Momentum beats optimality if the alternative is stalling again.
+*Why this order:* "running headless on Cloud Run, daily schedule, secrets managed properly" is the sentence that anchors a Staff/Principal conversation.
 
 ## Roadmap (from CLAUDE.md, condensed)
 
 - **Phase 1** — Local core ✅
 - **Phase 2** — Test sync (50-post cap) ✅
-- **Phase 3** — Flask GUI (cards, filters, FTS, manual tagging) ⬜
-- **Phase 4** — Containerise + GCP infra (SA, Secret Manager, GCS persistence) ⬜
-- **Phase 5** — DB persistence helper (`db_sync.py`: download at start, upload in `finally`) ⬜
-- **Phase 6** — Cloud Run deploy (scraper service + UI service) + full-archive staging test ⬜
+- **Phase 3** — Flask GUI (cards, filters, FTS) ✅
+- **Phase 4** — Containerise (Dockerfile, `.dockerignore`, build + local test) ← **next**
+- **Phase 5** — GCP infra (SA, Secret Manager, GCS persistence, `db_sync.py`) ⬜
+- **Phase 6** — Cloud Run deploy (scraper + UI services) + full-archive staging test ⬜
 - **Phase 7** — Cloud Scheduler (`0 7 * * *`, OIDC, `likarchive-sa`) ⬜
 - **Phase 8** — BigQuery sink (`bq_sink.py` → `likarchive.liked_posts`) + LookML model ⬜ (optional)
 

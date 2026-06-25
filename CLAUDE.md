@@ -9,16 +9,18 @@ On session start, also read LIKARCHIVE_RESTART.md for current state and next ste
 ## File structure
 
 ```
-scraper.py        — Playwright scroll loop, DOM extraction, main entry point
-save_session.py   — One-time manual login; saves browser profile to browser_profile/
-db.py             — SQLite schema, upsert logic, sync logging, FTS5, tag helpers
-scheduler.py      — Daily cron wrapper around scraper.run_sync()
-query.py          — CLI browser/search: recent posts, FTS search, author filter
-tagger.py         — Claude API auto-tagger (claude-haiku-4-5-20251001)
+scraper.py           — Playwright scroll loop, DOM extraction, main entry point
+save_session.py      — One-time manual login; saves browser profile to browser_profile/
+db.py                — SQLite schema, upsert logic, sync logging, FTS5, tag helpers
+scheduler.py         — Daily cron wrapper around scraper.run_sync()
+query.py             — CLI browser/search: recent posts, FTS search, author filter
+tagger.py            — Claude API auto-tagger (claude-haiku-4-5-20251001)
+app.py               — Flask web UI — search, filter, browse saved posts (Phase 3)
+templates/index.html — Single-page vanilla JS frontend served by app.py
 requirements.txt
-.env.example      — Copy to .env and fill in credentials
-CLAUDE.md         — This file
-NOTES.md          — Current state, known issues, next steps
+.env.example         — Copy to .env and fill in credentials
+CLAUDE.md            — This file
+NOTES.md             — Current state, known issues, next steps
 ```
 
 ## Running locally
@@ -53,7 +55,8 @@ python scheduler.py           # daily auto-sync (runs immediately, then 08:00 da
 - `author_name` TEXT
 - `author_profile` TEXT — URL to author's LinkedIn profile
 - `post_text` TEXT — full post body
-- `post_timestamp` TEXT — when post was published
+- `post_timestamp` TEXT — relative timestamp as scraped (e.g. "3w", "2d")
+- `post_date` TEXT — approximate ISO date reconstructed from `post_timestamp` + `scraped_at`; used for date-range filtering in the GUI
 - `text_hash` TEXT — MD5 of post_text, used for change detection on upsert
 - `scraped_at` TEXT — ISO timestamp of first insert
 - `last_updated` TEXT — ISO timestamp of last overwrite (hash changed)
@@ -128,39 +131,33 @@ Use `query.py` for interactive browsing — it wraps the FTS and author filter q
 - [x] Full-text search — SQLite FTS5 virtual table (`posts_fts`)
 - [x] Claude API integration — `tagger.py` auto-tags posts via `claude-haiku-4-5-20251001`
 
-### Phase 2 — Local test sync (next immediate step)
+### Phase 2 — Local test sync (complete)
 
 - [x] Set `MAX_POSTS=100` in `.env` and run `python scraper.py`
-- 50 posts is enough to build and test the GUI against real data
-- Full archive (`MAX_POSTS=0`) deferred to Phase 6 staging on Cloud Run
-- Verify row count via `query.py` and spot-check a few posts after completion
+- [x] Full archive (`MAX_POSTS=0`) deferred to Phase 6 staging on Cloud Run
+- [x] Verify row count via `query.py` and spot-check a few posts after completion
 
-### Phase 3 — GUI (build and test locally against 50 posts)
+### Phase 3 — GUI (complete)
 
-- [ ] Build `app.py` — Flask web UI serving the local SQLite DB
+- [x] Build `app.py` — Flask web UI serving the local SQLite DB
   - Single-page interface, no auth needed (local only at this stage)
   - Stack: Flask backend + vanilla JS frontend (no build step, keep it simple)
-- [ ] Post list view
+- [x] Post list view
   - Paginated card layout — author name, timestamp, post text truncated to ~3 lines, tags
   - Each card links out to the original LinkedIn post (direct URL)
-  - Click to expand full post text inline
-- [ ] Filters (sidebar or top bar)
+  - Click to expand full post text inline; default sort by most-recent LinkedIn post date
+- [x] Filters (sidebar or top bar)
   - Filter by tag — multi-select, populated from `tags` table via `tagger.py`
-  - Filter by author name — typeahead/dropdown populated from distinct `author_name` values
-  - Filter by date range — from/to date pickers against `post_timestamp`
+  - Filter by author name — dropdown populated from distinct `author_name` values
+  - Filter by date range — "Month Year" dropdowns (e.g. "Feb 2026") against `post_date`; newest months first
   - Filters combine with AND logic; reset button to clear all
-- [ ] Full-text search
-  - Search box hits the existing FTS5 `posts_fts` virtual table
+- [x] Full-text search
+  - Search box hits the existing FTS5 `posts_fts` virtual table (300ms debounce)
   - Results ranked by relevance (SQLite FTS5 `rank` column)
   - Compatible with active filters — search within current filtered set
-- [ ] Manual tagging
-  - Ability to add/remove tags on individual posts from the UI
-  - Writes directly to the `tags` table in SQLite
-  - Tag input with autocomplete from existing tags
-- [ ] Run and test locally: `flask run` or `python app.py`
-  - Test all filters, search, and tag editing against the 50-post dataset
+- [x] Run and test locally: `python app.py` → http://localhost:5000
 
-### Phase 4 — Containerisation
+### Phase 4 — Containerisation (next immediate step)
 
 - [ ] Write `Dockerfile`
   - Base image: `python:3.11-slim`
