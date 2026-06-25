@@ -1,6 +1,7 @@
+import re
 import sqlite3
 import hashlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 
@@ -58,7 +59,52 @@ def init_db(db_path: str) -> None:
                 PRIMARY KEY (post_url, tag_id)
             )
         """)
+
+        # Add post_date column if not present (idempotent migration)
+        try:
+            conn.execute("ALTER TABLE liked_posts ADD COLUMN post_date TEXT")
+        except Exception:
+            pass  # Column already exists
+
+        # Backfill post_date for any rows that are missing it
+        rows = conn.execute(
+            "SELECT id, post_timestamp, scraped_at FROM liked_posts WHERE post_date IS NULL"
+        ).fetchall()
+        for row in rows:
+            pd = _parse_post_date(row["post_timestamp"], row["scraped_at"])
+            if pd:
+                conn.execute(
+                    "UPDATE liked_posts SET post_date = ? WHERE id = ?", (pd, row["id"])
+                )
+
         conn.commit()
+
+
+def _parse_post_date(post_timestamp: Optional[str], scraped_at: Optional[str]) -> Optional[str]:
+    """
+    Reconstruct approximate post creation date from a relative LinkedIn
+    timestamp (e.g. "3w", "2d", "1mo") and the ISO scraped_at datetime.
+    Returns an ISO date string ("YYYY-MM-DD") or None if unparseable.
+    """
+    if not post_timestamp or not scraped_at:
+        return None
+    try:
+        base = datetime.fromisoformat(scraped_at)
+        if base.tzinfo is None:
+            base = base.replace(tzinfo=timezone.utc)
+        m = re.match(r'^(\d+)(h|d|w|mo|yr)$', post_timestamp.strip().lower())
+        if not m:
+            return None
+        n, unit = int(m.group(1)), m.group(2)
+        if   unit == 'h':  delta = timedelta(hours=n)
+        elif unit == 'd':  delta = timedelta(days=n)
+        elif unit == 'w':  delta = timedelta(weeks=n)
+        elif unit == 'mo': delta = timedelta(days=n * 30)
+        elif unit == 'yr': delta = timedelta(days=n * 365)
+        else:              return None
+        return (base - delta).date().isoformat()
+    except Exception:
+        return None
 
 
 def hash_text(text: str) -> str:
@@ -72,6 +118,7 @@ def upsert_post(conn: sqlite3.Connection, post: dict) -> str:
     """
     now = datetime.now(timezone.utc).isoformat()
     new_hash = hash_text(post.get("post_text", ""))
+    post_date = _parse_post_date(post.get("post_timestamp"), now)
 
     existing = conn.execute(
         "SELECT id, text_hash FROM liked_posts WHERE post_url = ?",
@@ -82,8 +129,8 @@ def upsert_post(conn: sqlite3.Connection, post: dict) -> str:
         cursor = conn.execute("""
             INSERT INTO liked_posts
                 (post_url, author_name, author_profile, post_text, post_timestamp,
-                 text_hash, scraped_at, last_updated)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 text_hash, scraped_at, last_updated, post_date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             post["post_url"],
             post.get("author_name"),
@@ -93,6 +140,7 @@ def upsert_post(conn: sqlite3.Connection, post: dict) -> str:
             new_hash,
             now,
             now,
+            post_date,
         ))
         conn.execute(
             "INSERT INTO posts_fts(rowid, post_url, author_name, post_text) VALUES (?, ?, ?, ?)",
@@ -113,7 +161,8 @@ def upsert_post(conn: sqlite3.Connection, post: dict) -> str:
                 post_text      = ?,
                 post_timestamp = ?,
                 text_hash      = ?,
-                last_updated   = ?
+                last_updated   = ?,
+                post_date      = ?
             WHERE post_url = ?
         """, (
             post.get("author_name"),
@@ -122,6 +171,7 @@ def upsert_post(conn: sqlite3.Connection, post: dict) -> str:
             post.get("post_timestamp"),
             new_hash,
             now,
+            post_date,
             post["post_url"],
         ))
         conn.execute(
