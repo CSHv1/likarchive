@@ -1,19 +1,15 @@
 import os
-import re
-import time
 import traceback
 from datetime import datetime, timezone
 from typing import Optional, Tuple
 
 from dotenv import load_dotenv
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+from playwright.sync_api import sync_playwright
 
 from db import get_connection, init_db, upsert_post, start_sync_log, finish_sync_log
 
 load_dotenv()
 
-LINKEDIN_EMAIL    = os.getenv("LINKEDIN_EMAIL")
-LINKEDIN_PASSWORD = os.getenv("LINKEDIN_PASSWORD")
 DB_PATH           = os.getenv("DB_PATH", "linkedin_likes.db")
 HEADLESS          = os.getenv("HEADLESS", "false").lower() == "true"
 SCROLL_PAUSE_MS   = int(os.getenv("SCROLL_PAUSE_MS", "2000"))
@@ -21,30 +17,6 @@ MAX_POSTS         = int(os.getenv("MAX_POSTS", "0"))
 BROWSER_PROFILE   = os.getenv("BROWSER_PROFILE", "browser_profile")
 
 SAVES_URL = "https://www.linkedin.com/my-items/saved-posts/?savedPostType=ALL"
-
-
-# ---------------------------------------------------------------------------
-# Auth
-# ---------------------------------------------------------------------------
-
-def login(page) -> None:
-    print("[auth] Navigating to LinkedIn login...")
-    page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded")
-    page.fill("#username", LINKEDIN_EMAIL)
-    page.fill("#password", LINKEDIN_PASSWORD)
-    page.click('[type="submit"]')
-
-    # Wait for redirect away from /login — indicates success
-    try:
-        page.wait_for_url(re.compile(r"linkedin\.com/(?!login)"), timeout=20_000)
-        print("[auth] Login successful.")
-    except PWTimeout:
-        # May be a CAPTCHA or security challenge — dump a screenshot and bail
-        page.screenshot(path="login_failed.png")
-        raise RuntimeError(
-            "Login timed out. Check login_failed.png — may require manual CAPTCHA. "
-            "Consider switching to cookie-based auth if this persists."
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -60,16 +32,18 @@ def extract_post_url(card) -> Optional[str]:
 
 def extract_author(card) -> Tuple[str, str]:
     """Returns (author_name, author_profile_url)."""
-    name_el = card.query_selector(
-        '.entity-result__content-actor span[aria-hidden="true"]'
-    )
-    name = name_el.inner_text().strip() if name_el else ""
-
-    profile_el = card.query_selector('.entity-result__content-actor a[href*="/in/"]')
+    name = ""
     profile_url = ""
+    profile_el = card.query_selector(
+        '.entity-result__content-actor a[href*="/in/"],'
+        '.entity-result__content-actor a[href*="/company/"]'
+    )
     if profile_el:
         profile_url = (profile_el.get_attribute("href") or "").split("?")[0]
-
+        # Name is in <span dir="ltr"> inside the anchor (no aria-hidden attribute).
+        name_span = profile_el.query_selector('span[dir="ltr"]')
+        if name_span:
+            name = name_span.inner_text().strip()
     return name, profile_url
 
 
@@ -79,11 +53,13 @@ def extract_post_text(card) -> str:
 
 
 def extract_timestamp(card) -> str:
-    el = card.query_selector('p.t-black--light.t-12 span[aria-hidden="true"]')
-    if el:
-        text = el.inner_text().strip()
-        # Strip trailing " • ..." e.g. "3w • LinkedIn" → "3w"
-        return text.split("•")[0].strip()
+    # Timestamp span is a plain direct child of p.t-black--light.t-12 (no aria attribute).
+    for sel in ('p.t-black--light.t-12 > span', 'p.t-black--light > span'):
+        el = card.query_selector(sel)
+        if el:
+            text = el.inner_text().strip()
+            if text:
+                return text.split("•")[0].strip()
     return ""
 
 

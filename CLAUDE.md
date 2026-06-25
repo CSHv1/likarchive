@@ -4,18 +4,21 @@
 
 A local Python/Playwright scraper that logs into LinkedIn, navigates to the user's saved posts page (`/my-items/saved-posts/`), paginates through the full list via infinite scroll, and stores extracted posts in a local SQLite database. Daily auto-sync via a scheduler. GCP Cloud Run deployment planned for a later phase.
 
+On session start, also read LIKARCHIVE_RESTART.md for current state and next steps.
+
 ## File structure
 
 ```
-scraper.py      — Playwright login, scroll loop, DOM extraction, main entry point
-db.py           — SQLite schema, upsert logic, sync logging, FTS5, tag helpers
-scheduler.py    — Daily cron wrapper around scraper.run_sync()
-query.py        — CLI browser/search: recent posts, FTS search, author filter
-tagger.py       — Claude API auto-tagger (claude-haiku-4-5-20251001)
+scraper.py        — Playwright scroll loop, DOM extraction, main entry point
+save_session.py   — One-time manual login; saves browser profile to browser_profile/
+db.py             — SQLite schema, upsert logic, sync logging, FTS5, tag helpers
+scheduler.py      — Daily cron wrapper around scraper.run_sync()
+query.py          — CLI browser/search: recent posts, FTS search, author filter
+tagger.py         — Claude API auto-tagger (claude-haiku-4-5-20251001)
 requirements.txt
-.env.example    — Copy to .env and fill in credentials
-CLAUDE.md       — This file
-NOTES.md        — Current state, known issues, next steps
+.env.example      — Copy to .env and fill in credentials
+CLAUDE.md         — This file
+NOTES.md          — Current state, known issues, next steps
 ```
 
 ## Running locally
@@ -23,22 +26,24 @@ NOTES.md        — Current state, known issues, next steps
 ```bash
 pip install -r requirements.txt
 playwright install chromium
-cp .env.example .env   # then fill in credentials
-python scraper.py      # one-off sync
-python scheduler.py    # daily auto-sync (runs immediately, then 08:00 daily)
+cp .env.example .env          # fill in ANTHROPIC_API_KEY (and DB_PATH if needed)
+python save_session.py        # one-time: log in manually, saves browser_profile/
+python scraper.py             # one-off sync (skip save_session.py if profile exists)
+python scheduler.py           # daily auto-sync (runs immediately, then 08:00 daily)
 ```
 
 ## Environment variables (.env)
 
-| Variable            | Default             | Description                                   |
-| ------------------- | ------------------- | --------------------------------------------- |
-| `LINKEDIN_EMAIL`    | —                   | LinkedIn login email                          |
-| `LINKEDIN_PASSWORD` | —                   | LinkedIn password                             |
-| `DB_PATH`           | `linkedin_likes.db` | SQLite file path                              |
-| `HEADLESS`          | `false`             | Set true once login confirmed working headful |
-| `SCROLL_PAUSE_MS`   | `2000`              | Pause between scrolls in ms                   |
-| `MAX_POSTS`         | `0`                 | Cap per sync run — 0 = unlimited              |
-| `ANTHROPIC_API_KEY` | —                   | Claude API key (required for `tagger.py`)     |
+| Variable            | Default             | Description                                                                          |
+| ------------------- | ------------------- | ------------------------------------------------------------------------------------ |
+| `LINKEDIN_EMAIL`    | —                   | LinkedIn login email — stored for reference; not read by code (login is manual)      |
+| `LINKEDIN_PASSWORD` | —                   | LinkedIn password — stored for reference; not read by code (login is manual)         |
+| `DB_PATH`           | `linkedin_likes.db` | SQLite file path                                                                     |
+| `HEADLESS`          | `false`             | Set `true` for headless Chromium (default headful for debugging)                     |
+| `SCROLL_PAUSE_MS`   | `2000`              | Pause between scrolls in ms                                                          |
+| `MAX_POSTS`         | `0`                 | Cap per sync run — 0 = unlimited                                                     |
+| `BROWSER_PROFILE`   | `browser_profile`   | Playwright persistent profile dir — run `save_session.py` first                      |
+| `ANTHROPIC_API_KEY` | —                   | Claude API key (required for `tagger.py`)                                            |
 
 ## Database schema
 
@@ -73,23 +78,23 @@ python scheduler.py    # daily auto-sync (runs immediately, then 08:00 daily)
 
 ## Key design decisions
 
-- **Auth**: username + password via .env, loaded by python-dotenv. Credentials never hardcoded.
+- **Auth**: persistent browser profile via `save_session.py` (manual login once, profile saved to `browser_profile/`). `scraper.py` loads the profile at runtime — no credentials are read by any code. Re-run `save_session.py` if the session expires. Credentials are stored in `.env` for personal reference only.
 - **Deduplication**: `post_url` is the primary key. On each sync, post text is MD5-hashed and compared — insert if new, overwrite if hash differs, skip if identical.
 - **Scroll**: height-based stale detection — stops after 4 consecutive scrolls with no DOM height change.
 - **Python version**: use `Optional[str]` / `Optional[dict]` (typing module) not `str | None` — target is Python 3.9 compatibility on Mac.
 
-## Confirmed working selectors (as of 2026-04-05)
+## Confirmed working selectors (as of 2026-06-25)
 
-DOM selectors were rewritten after inspecting `page_dump.html` from the live saved posts page. All five are confirmed working (`seen=10 new=10` on first run).
+Selectors were updated after LinkedIn changed their DOM structure. Author name no longer uses `aria-hidden`; timestamp span is now a plain direct child of the paragraph. Company page posts use `/company/` in the profile URL instead of `/in/`.
 
-| Target         | Selector                                                               |
-| -------------- | ---------------------------------------------------------------------- |
-| Card container | `[data-chameleon-result-urn*="urn:li:activity"]`                       |
-| Post URL       | `a[href*="/feed/update/"][data-test-app-aware-link]`                   |
-| Author name    | `.entity-result__content-actor span[aria-hidden="true"]`               |
-| Author profile | `.entity-result__content-actor a[href*="/in/"]`                        |
-| Post text      | `p.entity-result__content-summary--3-lines`                            |
-| Timestamp      | `p.t-black--light.t-12 span[aria-hidden="true"]` (relative, e.g. "3w") |
+| Target         | Selector                                                                                                    |
+| -------------- | ----------------------------------------------------------------------------------------------------------- |
+| Card container | `[data-chameleon-result-urn*="urn:li:activity"]`                                                            |
+| Post URL       | `a[href*="/feed/update/"][data-test-app-aware-link]`                                                        |
+| Author name    | `span[dir="ltr"]` inside `.entity-result__content-actor a[href*="/in/"], a[href*="/company/"]`              |
+| Author profile | `.entity-result__content-actor a[href*="/in/"], .entity-result__content-actor a[href*="/company/"]`         |
+| Post text      | `p.entity-result__content-summary--3-lines`                                                                 |
+| Timestamp      | `p.t-black--light.t-12 > span` (direct child; falls back to `p.t-black--light > span`)                     |
 
 ## Querying the database
 
@@ -125,10 +130,10 @@ Use `query.py` for interactive browsing — it wraps the FTS and author filter q
 
 ### Phase 2 — Local test sync (next immediate step)
 
-- [ ] Set `MAX_POSTS=100` in `.env` and run `python scraper.py`
-  - 50 posts is enough to build and test the GUI against real data
-  - Full archive (`MAX_POSTS=0`) deferred to Phase 6 staging on Cloud Run
-  - Verify row count via `query.py` and spot-check a few posts after completion
+- [x] Set `MAX_POSTS=100` in `.env` and run `python scraper.py`
+- 50 posts is enough to build and test the GUI against real data
+- Full archive (`MAX_POSTS=0`) deferred to Phase 6 staging on Cloud Run
+- Verify row count via `query.py` and spot-check a few posts after completion
 
 ### Phase 3 — GUI (build and test locally against 50 posts)
 

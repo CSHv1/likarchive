@@ -1,6 +1,7 @@
 import sqlite3
 import hashlib
 from datetime import datetime, timezone
+from typing import Optional
 
 
 def get_connection(db_path: str) -> sqlite3.Connection:
@@ -159,7 +160,7 @@ def set_post_tags(conn: sqlite3.Connection, post_url: str, tag_names: list) -> N
         )
 
 
-def finish_sync_log(conn: sqlite3.Connection, log_id: int, counts: dict, error: str = None) -> None:
+def finish_sync_log(conn: sqlite3.Connection, log_id: int, counts: dict, error: Optional[str] = None) -> None:
     now = datetime.now(timezone.utc).isoformat()
     conn.execute("""
         UPDATE sync_log
