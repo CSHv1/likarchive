@@ -1,0 +1,24 @@
+# Credentials and local state — never bake these into the image
+.env
+browser_profile/
+linkedin_likes.db
+*.db
+
+# Build / runtime artefacts
+__pycache__/
+*.pyc
+*.pyo
+venv/
+
+# Git
+.git/
+.gitignore
+
+# Scratch files and docs — not needed at runtime
+page_dump.html
+session.json
+design_brief.md
+NOTES.md
+CLAUDE.md
+LIKARCHIVE_RESTART.md
+README.md
