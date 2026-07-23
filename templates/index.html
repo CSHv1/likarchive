@@ -386,6 +386,29 @@
       color: var(--text-muted);
       font-size: 13px;
     }
+
+    /* Sync status banner */
+    #sync-banner {
+      display: none;
+      padding: 10px 24px;
+      font-size: 12.5px;
+      line-height: 1.5;
+      border-bottom: 1px solid var(--divider);
+      flex-shrink: 0;
+    }
+    #sync-banner.error {
+      display: block;
+      background: #FDECEC;
+      color: #8A1F1F;
+      border-bottom-color: #F5C6C6;
+    }
+    #sync-banner strong { font-weight: 700; }
+    #sync-banner code {
+      background: rgba(0,0,0,0.06);
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-size: 11.5px;
+    }
   </style>
 </head>
 <body>
@@ -448,6 +471,7 @@
 
 <!-- ── Main ───────────────────────────────────────────────────────────── -->
 <main id="main">
+  <div id="sync-banner"></div>
   <div id="topbar">
     <input id="search" type="search" autocomplete="off"
            placeholder="Search posts, authors, keywords and tags…">
@@ -478,6 +502,7 @@ document.addEventListener('DOMContentLoaded', () => {
   loadSidebar();
   initDateSelects();
   fetchPosts();
+  checkSyncStatus();
 
   // Search with debounce
   let timer;
@@ -541,6 +566,23 @@ document.addEventListener('DOMContentLoaded', () => {
     if (type === 'date')   clearDate();
   });
 });
+
+// ── Sync status ──────────────────────────────────────────────────────────
+async function checkSyncStatus() {
+  const banner = document.getElementById('sync-banner');
+  try {
+    const s = await fetch('/api/sync_status').then(r => r.json());
+    if (s.status !== 'error') { banner.className = ''; return; }
+
+    const when = s.finished_at ? new Date(s.finished_at).toLocaleString() : 'unknown time';
+    banner.className = 'error';
+    banner.innerHTML =
+      `<strong>Last sync failed (${esc(when)}).</strong> ${esc(s.error || 'Unknown error.')} ` +
+      `Run <code>python save_session.py</code> to log in again and refresh <code>auth_state.json</code>.`;
+  } catch {
+    banner.className = '';
+  }
+}
 
 // ── Data ─────────────────────────────────────────────────────────────────
 async function loadSidebar() {

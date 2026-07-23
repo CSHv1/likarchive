@@ -10,8 +10,10 @@ On session start, also read LIKARCHIVE_RESTART.md for current state and next ste
 
 ```
 scraper.py           — Playwright scroll loop, DOM extraction, main entry point
-save_session.py      — One-time manual login; saves browser profile to browser_profile/
+save_session.py      — One-time manual login; saves browser_profile/ (debugging) + auth_state.json (runtime auth)
 db.py                — SQLite schema, upsert logic, sync logging, FTS5, tag helpers
+db_sync.py           — GCS download_db()/upload_db() — no-op locally, active only when K_SERVICE is set (Phase 5)
+cloud_auth.py        — Secret Manager fetch_auth_state() — no-op locally, active only when K_SERVICE is set (Phase 5)
 scheduler.py         — Daily cron wrapper around scraper.run_sync()
 query.py             — CLI browser/search: recent posts, FTS search, author filter
 tagger.py            — Claude API auto-tagger (claude-haiku-4-5-20251001)
@@ -29,8 +31,8 @@ NOTES.md             — Current state, known issues, next steps
 pip install -r requirements.txt
 playwright install chromium
 cp .env.example .env          # fill in ANTHROPIC_API_KEY (and DB_PATH if needed)
-python save_session.py        # one-time: log in manually, saves browser_profile/
-python scraper.py             # one-off sync (skip save_session.py if profile exists)
+python save_session.py        # one-time: log in manually, saves browser_profile/ + auth_state.json
+python scraper.py             # one-off sync (skip save_session.py if auth_state.json exists)
 python scheduler.py           # daily auto-sync (runs immediately, then 08:00 daily)
 ```
 
@@ -44,8 +46,13 @@ python scheduler.py           # daily auto-sync (runs immediately, then 08:00 da
 | `HEADLESS`          | `false`             | Set `true` for headless Chromium (default headful for debugging)                     |
 | `SCROLL_PAUSE_MS`   | `2000`              | Pause between scrolls in ms                                                          |
 | `MAX_POSTS`         | `0`                 | Cap per sync run — 0 = unlimited                                                     |
-| `BROWSER_PROFILE`   | `browser_profile`   | Playwright persistent profile dir — run `save_session.py` first                      |
+| `BROWSER_PROFILE`   | `browser_profile`   | Playwright persistent profile dir — headed local debugging only, not read at runtime |
+| `STATE_PATH`        | `auth_state.json`   | Portable Playwright `storage_state()` export — what `scraper.py` actually loads      |
 | `ANTHROPIC_API_KEY` | —                   | Claude API key (required for `tagger.py`)                                            |
+| `K_SERVICE`         | —                   | Set automatically by Cloud Run — presence toggles the `db_sync.py`/`cloud_auth.py` calls in `run_sync()`. Never set locally. |
+| `GCP_PROJECT`       | —                   | GCP project ID — required by `cloud_auth.py` when `K_SERVICE` is set (Phase 5)       |
+| `GCS_BUCKET`        | `likarchive-db`     | GCS bucket for SQLite persistence (Phase 5)                                          |
+| `AUTH_STATE_SECRET` | `linkedin-auth-state` | Secret Manager secret name holding `auth_state.json` (Phase 5)                     |
 
 ## Database schema
 
@@ -81,7 +88,8 @@ python scheduler.py           # daily auto-sync (runs immediately, then 08:00 da
 
 ## Key design decisions
 
-- **Auth**: persistent browser profile via `save_session.py` (manual login once, profile saved to `browser_profile/`). `scraper.py` loads the profile at runtime — no credentials are read by any code. Re-run `save_session.py` if the session expires. Credentials are stored in `.env` for personal reference only.
+- **Auth**: manual login once via `save_session.py`, which writes two things — a persistent browser profile (`browser_profile/`, for headed local debugging) and a portable Playwright `storage_state()` JSON export (`auth_state.json`). `scraper.py` loads `auth_state.json` at runtime via `STATE_PATH` — no credentials are read by any code. The persistent profile is NOT used at runtime: Chromium encrypts its cookies with an OS-level key (macOS Keychain / Linux libsecret), so a profile created on macOS does not decrypt inside a Linux container (confirmed via Docker testing — LinkedIn silently redirected to the login page). `storage_state()` sidesteps this because Playwright manages the encoding itself rather than delegating to the OS, which is why it's the artifact that travels into Docker/Cloud Run. Re-run `save_session.py` if the session expires. Credentials are stored in `.env` for personal reference only.
+- **Session-expiry visibility**: when `auth_state.json` expires, LinkedIn redirects `/my-items/saved-posts/` to `/login`, `/authwall`, or `/checkpoint`. `scrape_saves()` in `scraper.py` checks `page.url` against `AUTH_FAILURE_MARKERS` right after navigation and raises immediately if matched — without this check, a dead session silently produces `posts_seen=0` and a `status='success'` sync_log row, indistinguishable from "no new saved posts today." The raised error propagates to `finish_sync_log()` as `status='error'` with a message telling you to re-run `save_session.py` (and, in Cloud Run, push a new Secret Manager version). `app.py` exposes `/api/sync_status` (latest `sync_log` row), and `templates/index.html` shows a red banner with that message on page load if the last sync errored. **What's still manual**: re-authenticating itself (2FA/CAPTCHA means it can't be scripted); this only gets you *notified* quickly. For Cloud Run, the daily Cloud Scheduler job failing is also visible in Cloud Logging/Cloud Scheduler's own run history — a Cloud Monitoring alert policy on repeated Cloud Run failures would close the last gap (push notification instead of having to check the GUI or logs); not yet built, candidate for Phase 7.
 - **Deduplication**: `post_url` is the primary key. On each sync, post text is MD5-hashed and compared — insert if new, overwrite if hash differs, skip if identical.
 - **Scroll**: height-based stale detection — stops after 4 consecutive scrolls with no DOM height change.
 - **Python version**: use `Optional[str]` / `Optional[dict]` (typing module) not `str | None` — target is Python 3.9 compatibility on Mac.
@@ -157,55 +165,58 @@ Use `query.py` for interactive browsing — it wraps the FTS and author filter q
   - Compatible with active filters — search within current filtered set
 - [x] Run and test locally: `python app.py` → http://localhost:5000
 
-### Phase 4 — Containerisation (next immediate step)
+### Phase 4 — Containerisation (complete)
 
-- [ ] Write `Dockerfile`
-  - Base image: `python:3.11-slim`
-  - Install system deps for Playwright: `libnss3`, `libatk1.0-0`, `libgbm1` etc. (use `playwright install-deps chromium`)
-  - Copy project files, install `requirements.txt`, run `playwright install chromium`
-  - Set `HEADLESS=true` as default env var — no display in Cloud Run
-  - Scraper entrypoint: `python scraper.py` (single sync run — Cloud Scheduler handles cadence)
-  - GUI entrypoint: separate Cloud Run service or `CMD` flag, serving `app.py` via gunicorn
-- [ ] Write `.dockerignore`
-  - Exclude: `.env`, `*.db`, `*.html`, `*.png`, `__pycache__`, `.git`
-- [ ] Build and test locally
-  - `docker build -t likarchive .`
-  - `docker run --env-file .env likarchive`
-  - Confirm posts land in DB and GUI is reachable at `localhost:8080`
+- [x] Write `Dockerfile`
+  - Base image: `mcr.microsoft.com/playwright/python:v1.44.0-jammy` (deviation from originally planned `python:3.11-slim` — ships Python 3.11 + Playwright + Chromium prebuilt on Ubuntu Jammy, `playwright install-deps` fails on Debian Trixie)
+  - `HEADLESS=true` default env var — no display in Cloud Run
+  - Scraper entrypoint (default `CMD`): `python scraper.py`
+  - GUI: override `CMD` with `gunicorn --bind 0.0.0.0:8080 app:app` at `docker run` / Cloud Run
+- [x] Write `.dockerignore` — excludes `.env`, `*.db`, `browser_profile/`, `auth_state.json`, `__pycache__`, `.git`, docs
+- [x] Build and test locally
+  - `docker build -t likarchive .` — succeeds
+  - GUI container (`gunicorn` + mounted `/data` volume) verified end-to-end: real posts/tags/pagination served correctly at `localhost:8080`
+  - Scraper container: initial attempt with the persistent `browser_profile/` (copied in from macOS) failed — LinkedIn redirected to login, because Chromium's OS-level cookie encryption (macOS Keychain) doesn't decrypt on Linux. Fixed by switching runtime auth to Playwright `storage_state()` (`auth_state.json`), which Playwright encodes itself rather than delegating to the OS. See `save_session.py` / `scraper.py` / `STATE_PATH`.
+  - Re-verified with `auth_state.json`: scraper container reached the real saved-posts page, extracted real cards, wrote to the mounted DB (`seen=3, new=0, skipped=3` on a `MAX_POSTS=3` capped run against already-archived posts). Confirmed working end-to-end.
 
-### Phase 5 — GCP infrastructure
+### Phase 5 — GCP infrastructure (complete)
 
-- [ ] GCP project setup
-  - Enable APIs: Cloud Run, Cloud Scheduler, Secret Manager, Artifact Registry, Cloud Storage
-  - Create a dedicated service account `likarchive-sa` with minimum required roles
-- [ ] Secret Manager — store credentials, never pass as plain env vars in Cloud Run
-  - `LINKEDIN_EMAIL` → `projects/{id}/secrets/linkedin-email`
-  - `LINKEDIN_PASSWORD` → `projects/{id}/secrets/linkedin-password`
-  - Grant `likarchive-sa` the `secretmanager.secretAccessor` role
-  - Update `scraper.py` to pull from Secret Manager when running in GCP (detect via `K_SERVICE` env var being set)
-- [ ] Cloud Storage — persistent SQLite volume
-  - Create a GCS bucket: `likarchive-db`
-  - On container start: download `linkedin_likes.db` from GCS if it exists, fall back to fresh init
-  - On container end: upload updated `linkedin_likes.db` back to GCS
-  - Add `db_sync.py` helper with `download_db()` and `upload_db()` functions using `google-cloud-storage`
-  - Add these calls to `run_sync()` in `scraper.py` — download at start, upload in `finally` block
+**Note — plan updated from the original roadmap:** `LINKEDIN_EMAIL`/`LINKEDIN_PASSWORD` are not read by any code (login is manual only via `save_session.py`), so they don't need a Secret Manager entry — storing them there would protect nothing that's actually load-bearing. The artifact that actually needs protecting is `auth_state.json` — a live LinkedIn session (Playwright `storage_state()` export). Treat it as a bearer token, not a password.
+
+**Project**: reusing existing GCP project `csh-data-engineering-on-gcp` (not a fresh dedicated project — a deliberate choice to avoid extra setup). Region: `europe-west2` throughout, per the original roadmap.
+
+- [x] `db_sync.py` — `download_db()`/`upload_db()` via `google-cloud-storage`, wired into `run_sync()` in `scraper.py` (gated on `K_SERVICE` being set — no-op locally)
+- [x] `cloud_auth.py` — `fetch_auth_state()` via `google-cloud-secret-manager`, wired into `run_sync()` the same way
+- [x] GCP project setup
+  - APIs enabled: `run.googleapis.com`, `cloudscheduler.googleapis.com`, `secretmanager.googleapis.com`, `artifactregistry.googleapis.com`, `storage.googleapis.com`
+  - Service account created: `likarchive-sa@csh-data-engineering-on-gcp.iam.gserviceaccount.com`
+  - **Billing gotcha hit during setup**: the project's billing account (`012D12-A0D43E-84AD66`) was closed (`OPEN: False`) — had to be reactivated in the console (payment method re-verification) before any API could be enabled. After reactivation, `gcloud billing projects link` then failed with `FAILED_PRECONDITION: Cloud billing quota exceeded` — this was a red herring: reactivating the account had already auto-restored its pre-existing link to this project (`gcloud billing projects describe` confirmed `billingEnabled: true`), so the "link" call was attempting a redundant new link. If this ever recurs (e.g. spinning up a genuinely new project), check `gcloud billing projects describe csh-data-engineering-on-gcp` before assuming the quota error means real work is needed.
+- [x] Secret Manager
+  - Secret `linkedin-auth-state` created, version 1 = the working `auth_state.json` as of 2026-07-23
+  - `likarchive-sa` granted `roles/secretmanager.secretAccessor` scoped to this secret only
+  - **Re-auth procedure (manual, no way around this):** when the LinkedIn session in `auth_state.json` expires, run `save_session.py` locally again, then push the new file as a fresh secret version: `gcloud secrets versions add linkedin-auth-state --data-file=auth_state.json`. Cloud Run has no display, so this step can't happen in the cloud — it always requires a local interactive login.
+- [x] Cloud Storage — persistent SQLite volume
+  - Bucket `gs://likarchive-db` created in `europe-west2`, uniform bucket-level access
+  - `likarchive-sa` granted `roles/storage.objectAdmin` scoped to this bucket only
+  - `db_sync.py` already implements download-at-start / upload-at-end
   - **Note**: simplest persistence approach; alternative is Cloud SQL (Postgres) but adds cost/complexity for a personal tool
 
-### Phase 6 — Cloud Run deployment + staging
+### Phase 6 — Cloud Run deployment + staging (next immediate step)
 
 - [ ] Push image to Artifact Registry
   - `gcloud artifacts repositories create likarchive --repository-format=docker --location=europe-west2`
-  - Tag and push: `docker tag likarchive europe-west2-docker.pkg.dev/{project}/likarchive/likarchive:latest`
+  - Tag and push: `docker tag likarchive europe-west2-docker.pkg.dev/csh-data-engineering-on-gcp/likarchive/likarchive:latest`
 - [ ] Deploy scraper service (no public URL — scheduler-triggered only)
-  - `gcloud run deploy likarchive-scraper --image ... --region europe-west2 --service-account likarchive-sa --no-allow-unauthenticated --memory 2Gi --timeout 900`
+  - `gcloud run deploy likarchive-scraper --image ... --region europe-west2 --service-account likarchive-sa --no-allow-unauthenticated --memory 2Gi --timeout 900 --set-env-vars GCP_PROJECT=csh-data-engineering-on-gcp`
   - Memory: Playwright + Chromium needs at least 1Gi, 2Gi is safer
   - Timeout: 900s (15 min) — give the scroll loop room to complete
-  - Mount secrets: `--set-secrets LINKEDIN_EMAIL=linkedin-email:latest,LINKEDIN_PASSWORD=linkedin-password:latest`
+  - No `--set-secrets` needed: `cloud_auth.py` pulls `auth_state.json` directly from Secret Manager via the API (using the service account's IAM grant), not via an env-var-mounted secret
 - [ ] Deploy GUI service (public URL)
-  - `gcloud run deploy likarchive-ui --image ... --region europe-west2 --service-account likarchive-sa --allow-unauthenticated --memory 512Mi`
-  - GUI reads DB from GCS on startup — download on each container cold start
+  - `gcloud run deploy likarchive-ui --image ... --region europe-west2 --service-account likarchive-sa --allow-unauthenticated --memory 512Mi --set-env-vars GCP_PROJECT=csh-data-engineering-on-gcp`
+  - `app.py` now calls `db_sync.download_db()` at module level (gated on `K_SERVICE`), with `init_db()` also moved to module level so it runs under gunicorn — fixed 2026-07-23, verified against the real `gs://likarchive-db` bucket via ADC locally (see below)
   - Consider `--min-instances=1` to avoid cold start latency on the UI
 - [ ] Staging test — run full archive sync: set `MAX_POSTS=0`, trigger scraper manually
+  - **Note**: `gs://likarchive-db` is currently empty — no Cloud Run scraper run has happened yet, so this staging test is also the first time the bucket actually gets populated
   - Verify full post count in DB via Cloud Logging output
   - Spot-check GUI filtering and search against full dataset
 
@@ -215,9 +226,10 @@ Use `query.py` for interactive browsing — it wraps the FTS and author filter q
   - Frequency: `0 7 * * *` (07:00 UTC daily)
   - Target: HTTP POST to the `likarchive-scraper` Cloud Run service URL
   - Auth: OIDC token with `likarchive-sa`
-  - `gcloud scheduler jobs create http likarchive-daily-sync --schedule "0 7 * * *" --uri {cloud-run-url} --http-method POST --oidc-service-account-email likarchive-sa@{project}.iam.gserviceaccount.com --location europe-west2`
+  - `gcloud scheduler jobs create http likarchive-daily-sync --schedule "0 7 * * *" --uri {cloud-run-url} --http-method POST --oidc-service-account-email likarchive-sa@csh-data-engineering-on-gcp.iam.gserviceaccount.com --location europe-west2`
 - [ ] Test trigger manually: `gcloud scheduler jobs run likarchive-daily-sync --location europe-west2`
 - [ ] Verify via Cloud Run logs that sync completed and DB was uploaded back to GCS
+- [ ] Cloud Monitoring alert policy on `likarchive-scraper` execution failures — pushes a notification (email at minimum) instead of relying on noticing the GUI banner or checking logs manually. Closes the last gap in session-expiry visibility (see Key design decisions); the scraper already fails loudly and distinctly on auth expiry, this just makes that failure page someone instead of sitting in Cloud Logging
 
 ### Phase 8 — BigQuery sink (optional, for Looker)
 

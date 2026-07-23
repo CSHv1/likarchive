@@ -10,17 +10,27 @@ A local Python/Playwright scraper that logs into LinkedIn, navigates to the save
 
 **Built and working locally:**
 
-- `scraper.py` — Playwright saved-posts navigation, infinite-scroll pagination, extracts post text / author / URL / timestamp (auth via persistent browser profile)
-- `save_session.py` — one-time manual login; saves browser profile to `browser_profile/`
+- `scraper.py` — Playwright saved-posts navigation, infinite-scroll pagination, extracts post text / author / URL / timestamp (auth via portable `storage_state()` JSON, `STATE_PATH`/`auth_state.json`)
+- `save_session.py` — one-time manual login; saves browser profile to `browser_profile/` (headed debugging) AND exports `auth_state.json` (what scraper.py actually reads)
 - `db.py` — SQLite with MD5 hash dedup; FTS5 + tags schema; `post_date` column (reconstructed from relative timestamps)
 - `query.py` — CLI browser with FTS5 search
 - `tagger.py` — auto-tagging via Claude Haiku (`claude-haiku-4-5-20251001`)
 - `scheduler.py` — daily sync
-- `app.py` + `templates/index.html` — Flask web UI: card list, tag/author/date filters, FTS search, load more pagination
+- `app.py` + `templates/index.html` — Flask web UI: card list, tag/author/date filters, FTS search, load more pagination, plus a red banner if the last sync failed (`/api/sync_status`)
+- `db_sync.py` / `cloud_auth.py` — GCS DB persistence / Secret Manager auth fetch, both gated on `K_SERVICE` (no-op locally)
 - `CLAUDE.md` — merged instructions + 8-phase roadmap
 - ~148 posts in local DB, all tagged
 
-**Stopped at:** end of Phase 3 (Flask GUI). Next build is Phase 4 (Docker containerisation), then GCP infra (Phases 5–7).
+**Stopped at:** Phase 5 complete. Phase 4 (containerisation) verified end-to-end including the `storage_state()` auth fix for running headless in Linux. Also added session-expiry detection: `scrape_saves()` now raises immediately if redirected to `/login`/`/authwall`/`/checkpoint` instead of silently logging a "successful" 0-post sync, and the GUI shows a banner when the last sync errored. Phase 5 (GCP infra) is fully provisioned on the existing project `csh-data-engineering-on-gcp` (region `europe-west2`): APIs enabled, `likarchive-sa` service account created, `gs://likarchive-db` bucket created, `linkedin-auth-state` secret created (version 1 = current `auth_state.json`), IAM grants scoped to just that bucket/secret. Hit and resolved a billing hiccup along the way — see CLAUDE.md Phase 5 notes for details (closed billing account, plus a red-herring quota error on re-linking).
+
+Also fixed a gap found while scoping Phase 6: `app.py` (the GUI service) never called `download_db()` and had `init_db()` trapped inside `if __name__ == "__main__"`, which gunicorn never executes — the GUI would have started with no DB file and no schema on Cloud Run, 500ing on every API route. Both are now module-level, gated the same way as the scraper (`K_SERVICE` check). Verified locally by simulating the Cloud Run env against the real `gs://likarchive-db` bucket — confirmed it reaches the bucket, handles "no DB yet" gracefully (bucket is genuinely empty, no scraper Cloud Run run has happened yet), and creates the schema correctly. Along the way, also fixed `db_sync.py`'s `storage.Client()` call to pass `project=GCP_PROJECT` explicitly — without it, the client couldn't infer a project from these particular ADC credentials (multiple GCP projects on this account, no unambiguous default).
+
+**Next up:** Phase 6 — Cloud Run deployment (push image to Artifact Registry, deploy scraper + GUI services, full-archive staging test — this will be the first time `gs://likarchive-db` actually gets populated).
+
+**Environment notes for next session:**
+- `gcloud` is installed via Homebrew cask but needs `CLOUDSDK_PYTHON` pointed at a supported Python (system default is 3.7, unsupported) — `export CLOUDSDK_PYTHON=/Users/conradhallpro/.pyenv/versions/3.10.11/bin/python3` and add `/usr/local/share/google-cloud-sdk/bin` to `PATH`. This is in `~/.bashrc`/`~/.bash_profile` now, but Claude Code's Bash tool doesn't source either automatically mid-session — set both env vars explicitly in-command if `gcloud` isn't found.
+- Testing `db_sync.py`/`cloud_auth.py` locally (outside Docker/Cloud Run) needs Application Default Credentials, separate from the `gcloud auth login` used for the CLI: `gcloud auth application-default login`. Already set up as of 2026-07-23.
+- The project venv now has `google-cloud-storage`/`google-cloud-secret-manager` installed (matches `requirements.txt`).
 
 ## ⚠️ Known watch-point — check this FIRST
 
@@ -32,8 +42,8 @@ LinkedIn class names are unstable. Selectors were rewritten in June 2026 after t
 HEADLESS=false MAX_POSTS=5 python scraper.py
 ```
 
-- `browser_profile/` holds the saved session — no login needed unless the session has expired.
-- If the session has expired, run `python save_session.py` first (opens a headed browser, log in manually, close when on the feed).
+- `auth_state.json` holds the saved session (portable JSON, read via `STATE_PATH`) — no login needed unless the session has expired.
+- If the session has expired or `auth_state.json` doesn't exist yet, run `python save_session.py` first (opens a headed browser, log in manually, close when on the feed — this writes both `browser_profile/` and `auth_state.json`).
 - If `author_name` comes back empty or shows "• 3rd+" / "• 2nd" → selector drift. Grab the outerHTML of `.entity-result__content-actor` from DevTools and update `extract_author` in `scraper.py`.
 - If `post_timestamp` is empty → timestamp selector drifted. Check `p.t-black--light > span` structure in DevTools and update `extract_timestamp`.
 
@@ -43,14 +53,13 @@ HEADLESS=false MAX_POSTS=5 python scraper.py
 - Headful, 5 posts, confirm text/author/URL/timestamp populate in SQLite.
 - Fix selectors if drifted. (Bonus: this reloads the whole codebase into my head.)
 
-### Step 2 — Next build: Phase 4 (Containerisation)
+### Step 2 — Next build: Phase 6 (Cloud Run deployment)
 
-GUI is done (Phase 3 ✅). The next step is Docker + GCP (Phases 4–7):
-- Dockerfile: `python:3.11-slim`, `playwright install-deps chromium`, `HEADLESS=true` default
-- `.dockerignore`: exclude `.env`, `*.db`, `browser_profile/`, `__pycache__`, `.git`
-- Build and test locally: `docker build -t likarchive . && docker run --env-file .env likarchive`
-- GCP infra: dedicated SA, Secret Manager for creds, GCS for SQLite persistence (`db_sync.py`)
-- Cloud Run deploy + Cloud Scheduler daily trigger
+Phases 3–5 are all done: GUI, containerisation (including the `storage_state()` auth fix), and GCP infra (SA, bucket, secret, IAM all provisioned on `csh-data-engineering-on-gcp`). Next:
+- Push image to Artifact Registry (`europe-west2-docker.pkg.dev/csh-data-engineering-on-gcp/likarchive/likarchive:latest`)
+- Deploy scraper service (no public URL, `--service-account likarchive-sa@csh-data-engineering-on-gcp.iam.gserviceaccount.com`, `--set-env-vars GCP_PROJECT=csh-data-engineering-on-gcp`)
+- Deploy GUI service (`app.py`'s `download_db()`/`init_db()` wiring already fixed and verified — see above)
+- Staging test: full-archive sync (`MAX_POSTS=0`) triggered manually, verify count + spot-check GUI
 
 *Why this order:* "running headless on Cloud Run, daily schedule, secrets managed properly" is the sentence that anchors a Staff/Principal conversation.
 
@@ -59,9 +68,9 @@ GUI is done (Phase 3 ✅). The next step is Docker + GCP (Phases 4–7):
 - **Phase 1** — Local core ✅
 - **Phase 2** — Test sync (50-post cap) ✅
 - **Phase 3** — Flask GUI (cards, filters, FTS) ✅
-- **Phase 4** — Containerise (Dockerfile, `.dockerignore`, build + local test) ← **next**
-- **Phase 5** — GCP infra (SA, Secret Manager, GCS persistence, `db_sync.py`) ⬜
-- **Phase 6** — Cloud Run deploy (scraper + UI services) + full-archive staging test ⬜
+- **Phase 4** — Containerise (Dockerfile ✅, `.dockerignore` ✅, GUI verified ✅, scraper `storage_state()` auth fix verified ✅) ✅
+- **Phase 5** — GCP infra (SA ✅, Secret Manager ✅, GCS bucket ✅, IAM ✅ — all on `csh-data-engineering-on-gcp`) ✅
+- **Phase 6** — Cloud Run deploy (scraper + UI services) + full-archive staging test ← **next**
 - **Phase 7** — Cloud Scheduler (`0 7 * * *`, OIDC, `likarchive-sa`) ⬜
 - **Phase 8** — BigQuery sink (`bq_sink.py` → `likarchive.liked_posts`) + LookML model ⬜ (optional)
 
@@ -76,6 +85,9 @@ HEADLESS=false MAX_POSTS=5 python scraper.py
 
 ## Session log (fill in as I go)
 
-- [ ] Step 1 verify run — selectors OK? (date: ___)
-- [ ] Chosen order: A / B
-- [ ] Next concrete task: ___
+- [x] Step 1 verify run — selectors OK, `auth_state.json` generated and working (2026-07-23)
+- [x] Phase 4 containerisation verified — GUI + scraper containers both confirmed end-to-end (2026-07-23)
+- [x] Session-expiry detection + GUI banner added (2026-07-23)
+- [x] Phase 5 GCP infra fully provisioned on `csh-data-engineering-on-gcp` (2026-07-23)
+- [x] app.py GCS DB sync fix (+ db_sync.py project fix) — verified against real bucket via ADC (2026-07-23)
+- [ ] Next concrete task: start Phase 6 (Artifact Registry push, Cloud Run deploy)

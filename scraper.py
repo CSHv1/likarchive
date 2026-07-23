@@ -14,7 +14,7 @@ DB_PATH           = os.getenv("DB_PATH", "linkedin_likes.db")
 HEADLESS          = os.getenv("HEADLESS", "false").lower() == "true"
 SCROLL_PAUSE_MS   = int(os.getenv("SCROLL_PAUSE_MS", "2000"))
 MAX_POSTS         = int(os.getenv("MAX_POSTS", "0"))
-BROWSER_PROFILE   = os.getenv("BROWSER_PROFILE", "browser_profile")
+STATE_PATH        = os.getenv("STATE_PATH", "auth_state.json")
 
 SAVES_URL = "https://www.linkedin.com/my-items/saved-posts/?savedPostType=ALL"
 
@@ -85,6 +85,9 @@ def parse_card(card) -> Optional[dict]:
 # Scroll + scrape
 # ---------------------------------------------------------------------------
 
+AUTH_FAILURE_MARKERS = ("/login", "/authwall", "/checkpoint")
+
+
 def scrape_saves(page, conn, log_id: int) -> dict:
     counts = {"seen": 0, "new": 0, "updated": 0, "skipped": 0}
     seen_urls: set[str] = set()
@@ -92,6 +95,15 @@ def scrape_saves(page, conn, log_id: int) -> dict:
     print(f"[scraper] Navigating to saved posts: {SAVES_URL}")
     page.goto(SAVES_URL, wait_until="domcontentloaded")
     page.wait_for_timeout(3000)
+
+    if any(marker in page.url for marker in AUTH_FAILURE_MARKERS):
+        raise RuntimeError(
+            f"LinkedIn session expired or was rejected (redirected to '{page.url}' "
+            "instead of saved posts). Run `python save_session.py` to log in again "
+            "and refresh auth_state.json. If this is running in Cloud Run, also push "
+            "the new file as a Secret Manager version: `gcloud secrets versions add "
+            "linkedin-auth-state --data-file=auth_state.json`."
+        )
 
     last_height = 0
     stale_scrolls = 0
@@ -150,6 +162,13 @@ def run_sync() -> None:
     print(f"[sync] Starting at {datetime.now(timezone.utc).isoformat()}")
     print(f"{'='*60}")
 
+    in_cloud_run = bool(os.getenv("K_SERVICE"))
+    if in_cloud_run:
+        from cloud_auth import fetch_auth_state
+        from db_sync import download_db
+        fetch_auth_state(STATE_PATH)
+        download_db(DB_PATH)
+
     init_db(DB_PATH)
     conn = get_connection(DB_PATH)
     log_id = start_sync_log(conn)
@@ -159,17 +178,19 @@ def run_sync() -> None:
 
     try:
         with sync_playwright() as p:
-            if not os.path.isdir(BROWSER_PROFILE):
+            if not os.path.isfile(STATE_PATH):
                 raise RuntimeError(
-                    f"No browser profile found at '{BROWSER_PROFILE}'. "
+                    f"No auth state found at '{STATE_PATH}'. "
                     "Run `python save_session.py` first to log in and save your session."
                 )
 
-            print(f"[auth] Loading browser profile from '{BROWSER_PROFILE}/'")
-            context = p.chromium.launch_persistent_context(
-                user_data_dir=BROWSER_PROFILE,
+            print(f"[auth] Loading auth state from '{STATE_PATH}'")
+            browser = p.chromium.launch(
                 headless=HEADLESS,
                 args=["--disable-blink-features=AutomationControlled"],
+            )
+            context = browser.new_context(
+                storage_state=STATE_PATH,
                 user_agent=(
                     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -182,6 +203,7 @@ def run_sync() -> None:
             counts = scrape_saves(page, conn, log_id)
 
             context.close()
+            browser.close()
 
     except Exception as e:
         error_msg = traceback.format_exc()
@@ -190,6 +212,9 @@ def run_sync() -> None:
     finally:
         finish_sync_log(conn, log_id, counts, error=error_msg)
         conn.close()
+        if in_cloud_run:
+            from db_sync import upload_db
+            upload_db(DB_PATH)
 
     print(f"\n[sync] Done — seen={counts['seen']} new={counts['new']} "
           f"updated={counts['updated']} skipped={counts['skipped']}")

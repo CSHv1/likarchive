@@ -8,6 +8,12 @@ load_dotenv()
 app = Flask(__name__)
 DB_PATH = os.getenv("DB_PATH", "linkedin_likes.db")
 
+if os.getenv("K_SERVICE"):
+    from db_sync import download_db
+    download_db(DB_PATH)
+
+init_db(DB_PATH)
+
 
 def _build_posts_query(q, tags, author, date_from, date_to, for_count=False):
     select = "SELECT COUNT(*)" if for_count else (
@@ -139,6 +145,23 @@ def get_authors():
     return jsonify([{"name": r["author_name"], "count": r["count"]} for r in rows])
 
 
+@app.route("/api/sync_status")
+def get_sync_status():
+    conn = get_connection(DB_PATH)
+    row = conn.execute(
+        "SELECT started_at, finished_at, status, error FROM sync_log "
+        "ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({"status": "none"})
+    return jsonify({
+        "started_at":  row["started_at"],
+        "finished_at": row["finished_at"],
+        "status":      row["status"],
+        "error":       row["error"],
+    })
+
+
 if __name__ == "__main__":
-    init_db(DB_PATH)
     app.run(debug=True, port=5000)
