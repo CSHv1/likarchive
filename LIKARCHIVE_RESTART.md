@@ -27,6 +27,10 @@ Also fixed a gap found while scoping Phase 6: `app.py` (the GUI service) never c
 
 **Next up:** Phase 6 — Cloud Run deployment (push image to Artifact Registry, deploy scraper + GUI services, full-archive staging test — this will be the first time `gs://likarchive-db` actually gets populated).
 
+**Branch:** all of this session's work (Phase 4 auth fix, session-expiry detection, Phase 5 GCP infra, Phase 6 app.py fix) is on `gcp_deploy`, pushed to `origin/gcp_deploy` on GitHub (this repo is public — `github.com/CSHv1/likarchive`). `main` is unaffected. Continue Phase 6 work on `gcp_deploy`; merge to `main` via PR once Cloud Run deployment is verified end-to-end.
+
+**Public-repo caution:** this repo is public. One near-miss this session: the GCP billing account ID got written into `CLAUDE.md` and almost got pushed before being caught and redacted. Before committing anything that documents GCP setup, double-check for billing account IDs, service account keys, or other account-identifying details that shouldn't be public — project IDs/service account emails/bucket names are fine (access is via IAM, not obscurity), but billing account IDs and any credential material are not.
+
 **Environment notes for next session:**
 - `gcloud` is installed via Homebrew cask but needs `CLOUDSDK_PYTHON` pointed at a supported Python (system default is 3.7, unsupported) — `export CLOUDSDK_PYTHON=/Users/conradhallpro/.pyenv/versions/3.10.11/bin/python3` and add `/usr/local/share/google-cloud-sdk/bin` to `PATH`. This is in `~/.bashrc`/`~/.bash_profile` now, but Claude Code's Bash tool doesn't source either automatically mid-session — set both env vars explicitly in-command if `gcloud` isn't found.
 - Testing `db_sync.py`/`cloud_auth.py` locally (outside Docker/Cloud Run) needs Application Default Credentials, separate from the `gcloud auth login` used for the CLI: `gcloud auth application-default login`. Already set up as of 2026-07-23.
