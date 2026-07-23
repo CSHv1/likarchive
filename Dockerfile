@@ -13,10 +13,13 @@ COPY scraper.py db.py tagger.py app.py scheduler.py query.py save_session.py ./
 COPY templates/ ./templates/
 
 # Container defaults — all can be overridden at docker run / Cloud Run env vars.
-# DB and browser profile live under /data so a single volume mount covers both.
+# DB and auth state live under /data so a single volume mount covers both.
+# STATE_PATH is a portable Playwright storage_state() JSON export (see
+# save_session.py) — the OS-encrypted persistent profile does not survive
+# the move from macOS to this Linux image, so that is not used at runtime.
 ENV HEADLESS=true
 ENV DB_PATH=/data/linkedin_likes.db
-ENV BROWSER_PROFILE=/data/browser_profile
+ENV STATE_PATH=/data/auth_state.json
 
 EXPOSE 8080
 

@@ -2,6 +2,7 @@
 .env
 session.json
 browser_profile/
+auth_state.json
 
 # Database
 *.db

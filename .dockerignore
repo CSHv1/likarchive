@@ -1,6 +1,7 @@
 # Credentials and local state — never bake these into the image
 .env
 browser_profile/
+auth_state.json
 linkedin_likes.db
 *.db
 
