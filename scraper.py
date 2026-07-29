@@ -162,7 +162,11 @@ def run_sync() -> None:
     print(f"[sync] Starting at {datetime.now(timezone.utc).isoformat()}")
     print(f"{'='*60}")
 
-    in_cloud_run = bool(os.getenv("K_SERVICE"))
+    # K_SERVICE is set for Cloud Run Services; scraper.py runs as a Cloud Run
+    # Job (it's a one-shot script, not an HTTP server), which sets
+    # CLOUD_RUN_JOB instead. Check both so this works regardless of which
+    # Cloud Run product actually ends up running it.
+    in_cloud_run = bool(os.getenv("K_SERVICE") or os.getenv("CLOUD_RUN_JOB"))
     if in_cloud_run:
         from cloud_auth import fetch_auth_state
         from db_sync import download_db

@@ -9,7 +9,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code only — credentials, DB, and browser profile stay outside
-COPY scraper.py db.py tagger.py app.py scheduler.py query.py save_session.py ./
+COPY scraper.py db.py tagger.py app.py scheduler.py query.py save_session.py db_sync.py cloud_auth.py ./
 COPY templates/ ./templates/
 
 # Container defaults — all can be overridden at docker run / Cloud Run env vars.
