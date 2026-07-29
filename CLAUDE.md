@@ -201,32 +201,36 @@ Use `query.py` for interactive browsing — it wraps the FTS and author filter q
   - `db_sync.py` already implements download-at-start / upload-at-end
   - **Note**: simplest persistence approach; alternative is Cloud SQL (Postgres) but adds cost/complexity for a personal tool
 
-### Phase 6 — Cloud Run deployment + staging (next immediate step)
+### Phase 6 — Cloud Run deployment + staging (complete)
 
-- [ ] Push image to Artifact Registry
-  - `gcloud artifacts repositories create likarchive --repository-format=docker --location=europe-west2`
-  - Tag and push: `docker tag likarchive europe-west2-docker.pkg.dev/csh-data-engineering-on-gcp/likarchive/likarchive:latest`
-- [ ] Deploy scraper service (no public URL — scheduler-triggered only)
-  - `gcloud run deploy likarchive-scraper --image ... --region europe-west2 --service-account likarchive-sa --no-allow-unauthenticated --memory 2Gi --timeout 900 --set-env-vars GCP_PROJECT=csh-data-engineering-on-gcp`
-  - Memory: Playwright + Chromium needs at least 1Gi, 2Gi is safer
-  - Timeout: 900s (15 min) — give the scroll loop room to complete
-  - No `--set-secrets` needed: `cloud_auth.py` pulls `auth_state.json` directly from Secret Manager via the API (using the service account's IAM grant), not via an env-var-mounted secret
-- [ ] Deploy GUI service (public URL)
-  - `gcloud run deploy likarchive-ui --image ... --region europe-west2 --service-account likarchive-sa --allow-unauthenticated --memory 512Mi --set-env-vars GCP_PROJECT=csh-data-engineering-on-gcp`
-  - `app.py` now calls `db_sync.download_db()` at module level (gated on `K_SERVICE`), with `init_db()` also moved to module level so it runs under gunicorn — fixed 2026-07-23, verified against the real `gs://likarchive-db` bucket via ADC locally (see below)
-  - Consider `--min-instances=1` to avoid cold start latency on the UI
-- [ ] Staging test — run full archive sync: set `MAX_POSTS=0`, trigger scraper manually
-  - **Note**: `gs://likarchive-db` is currently empty — no Cloud Run scraper run has happened yet, so this staging test is also the first time the bucket actually gets populated
-  - Verify full post count in DB via Cloud Logging output
-  - Spot-check GUI filtering and search against full dataset
+Live resources (region `europe-west2`, project `csh-data-engineering-on-gcp`):
+- Image: `europe-west2-docker.pkg.dev/csh-data-engineering-on-gcp/likarchive/likarchive:latest`
+- Scraper: Cloud Run **Job** `likarchive-scraper` — trigger with `gcloud run jobs execute likarchive-scraper --region europe-west2`
+- GUI: Cloud Run **Service** `likarchive-ui` — `https://likarchive-ui-588295099118.europe-west2.run.app`
+
+**Four real bugs surfaced during this deploy, all fixed — worth reading before touching this again:**
+
+1. **Image architecture**: built on Apple Silicon, images default to `arm64`; Cloud Run requires `linux/amd64`. Fails as `exec format error` at container start, not at build or push time. Always build with `docker build --platform linux/amd64 ...` for anything headed to Cloud Run.
+2. **Dockerfile `COPY` drift**: the explicit file list (`COPY scraper.py db.py ... ./`) wasn't updated when `db_sync.py`/`cloud_auth.py` were added in Phase 5 — `ModuleNotFoundError` at runtime, invisible at build time since nothing checks the copied set against what the code imports. Fixed; watch for this again if new top-level modules are added.
+3. **Cloud Run Service vs. Job**: `scraper.py` is a one-shot script with no HTTP listener. `gcloud run deploy` (Services) requires the container to bind `$PORT` and pass a startup TCP probe — the scraper can never satisfy that, no matter the timeout. It has to be a Cloud Run **Job** (`gcloud run jobs create`/`execute`), which runs to completion and exits normally. The GUI (gunicorn, binds a port) is correctly a Service. Corollary: `K_SERVICE` is a Services-only env var; Jobs set `CLOUD_RUN_JOB` instead — `scraper.py`'s cloud-detection now checks both.
+4. **`/data` doesn't exist in Cloud Run**: `DB_PATH`/`STATE_PATH` defaulted to `/data/...` per the Dockerfile, which assumes a bind-mounted volume (`docker run -v host:/data`) — fine locally, but Cloud Run has no such mount, so `/data` is simply a missing directory and `sqlite3.connect()`/file writes fail with `unable to open database file`. Both the Job and the Service now explicitly override `DB_PATH=/tmp/linkedin_likes.db` (Job also overrides `STATE_PATH=/tmp/auth_state.json`) via `--set-env-vars`/`--update-env-vars` — `/tmp` always exists and is writable in Cloud Run. The Dockerfile's own `/data` defaults are left as-is; they're still correct for local `docker run` testing with an explicit volume.
+
+- [x] Push image to Artifact Registry — repo `likarchive` created, image pushed
+- [x] Deploy scraper as a Cloud Run **Job** (not a Service — see above): `likarchive-sa`, 2Gi memory, 900s task-timeout, `GCP_PROJECT`/`GCS_BUCKET`/`AUTH_STATE_SECRET`/`DB_PATH`/`STATE_PATH` env vars
+- [x] Deploy GUI as a Cloud Run Service: `likarchive-sa`, 512Mi memory, public (`--allow-unauthenticated`), `GCP_PROJECT`/`GCS_BUCKET`/`DB_PATH` env vars, `--command gunicorn --args="--bind","0.0.0.0:8080","app:app"`
+  - `--min-instances=1` not yet set — GUI will cold-start on the first request after idling; revisit if that latency matters
+- [x] Capped staging test (not the full `MAX_POSTS=0` archive — deliberately small first, per established practice for anything touching the live LinkedIn account): `gcloud run jobs execute likarchive-scraper --update-env-vars=MAX_POSTS=5 --wait` — 5 real posts scraped, uploaded to `gs://likarchive-db`, confirmed served correctly by the GUI after a forced revision refresh
+- [ ] Full-archive sync (`MAX_POSTS=0`) — not yet run; the capped test proved the pipeline, but the complete backlog hasn't been pulled into Cloud Run's copy of the DB yet
 
 ### Phase 7 — Cloud Scheduler
 
+**Plan corrected from the original roadmap**: this assumed the scraper was a Cloud Run Service reachable by a plain HTTP POST to its URL. Since Phase 6 established it has to be a Cloud Run **Job** instead (see Phase 6 notes), there is no service URL to POST to — Cloud Scheduler has to call the Cloud Run Admin API's job-execution endpoint instead.
+
 - [ ] Create daily sync job
   - Frequency: `0 7 * * *` (07:00 UTC daily)
-  - Target: HTTP POST to the `likarchive-scraper` Cloud Run service URL
-  - Auth: OIDC token with `likarchive-sa`
-  - `gcloud scheduler jobs create http likarchive-daily-sync --schedule "0 7 * * *" --uri {cloud-run-url} --http-method POST --oidc-service-account-email likarchive-sa@csh-data-engineering-on-gcp.iam.gserviceaccount.com --location europe-west2`
+  - Target: `POST https://europe-west2-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/csh-data-engineering-on-gcp/jobs/likarchive-scraper:run`
+  - Auth: OAuth token (not OIDC — this is a direct Cloud Run Admin API call, not a Cloud Run Service invocation) with `likarchive-sa`, which needs `roles/run.invoker` on the job in addition to its existing bucket/secret grants
+  - `gcloud scheduler jobs create http likarchive-daily-sync --schedule "0 7 * * *" --uri "https://europe-west2-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/csh-data-engineering-on-gcp/jobs/likarchive-scraper:run" --http-method POST --oauth-service-account-email likarchive-sa@csh-data-engineering-on-gcp.iam.gserviceaccount.com --location europe-west2`
 - [ ] Test trigger manually: `gcloud scheduler jobs run likarchive-daily-sync --location europe-west2`
 - [ ] Verify via Cloud Run logs that sync completed and DB was uploaded back to GCS
 - [ ] Cloud Monitoring alert policy on `likarchive-scraper` execution failures — pushes a notification (email at minimum) instead of relying on noticing the GUI banner or checking logs manually. Closes the last gap in session-expiry visibility (see Key design decisions); the scraper already fails loudly and distinctly on auth expiry, this just makes that failure page someone instead of sitting in Cloud Logging

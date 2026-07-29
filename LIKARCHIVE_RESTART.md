@@ -25,7 +25,13 @@ A local Python/Playwright scraper that logs into LinkedIn, navigates to the save
 
 Also fixed a gap found while scoping Phase 6: `app.py` (the GUI service) never called `download_db()` and had `init_db()` trapped inside `if __name__ == "__main__"`, which gunicorn never executes — the GUI would have started with no DB file and no schema on Cloud Run, 500ing on every API route. Both are now module-level, gated the same way as the scraper (`K_SERVICE` check). Verified locally by simulating the Cloud Run env against the real `gs://likarchive-db` bucket — confirmed it reaches the bucket, handles "no DB yet" gracefully (bucket is genuinely empty, no scraper Cloud Run run has happened yet), and creates the schema correctly. Along the way, also fixed `db_sync.py`'s `storage.Client()` call to pass `project=GCP_PROJECT` explicitly — without it, the client couldn't infer a project from these particular ADC credentials (multiple GCP projects on this account, no unambiguous default).
 
-**Next up:** Phase 6 — Cloud Run deployment (push image to Artifact Registry, deploy scraper + GUI services, full-archive staging test — this will be the first time `gs://likarchive-db` actually gets populated).
+**Phase 6 is now done too (2026-07-29).** Live: Cloud Run Job `likarchive-scraper` and Cloud Run Service `likarchive-ui` (`https://likarchive-ui-588295099118.europe-west2.run.app`), both on `csh-data-engineering-on-gcp`/`europe-west2`. A capped test (`MAX_POSTS=5`) scraped 5 real posts, uploaded them to `gs://likarchive-db`, and the GUI served them correctly after a revision refresh — full pipeline confirmed working.
+
+This deploy surfaced four real, non-obvious bugs (all fixed, all detailed in `CLAUDE.md`'s Phase 6 section — read that before touching deployment again): (1) images built on this Apple Silicon Mac default to `arm64`, Cloud Run needs `linux/amd64` — always `docker build --platform linux/amd64`; (2) the Dockerfile's `COPY` line wasn't updated when `db_sync.py`/`cloud_auth.py` were added in Phase 5, causing `ModuleNotFoundError`; (3) the scraper *cannot* be a Cloud Run Service (`gcloud run deploy`) — it's a one-shot script with no HTTP listener, and Services require a port health-check the scraper can never pass. It has to be a Cloud Run **Job**. This also means it sets `CLOUD_RUN_JOB`, not `K_SERVICE`, so `scraper.py`'s cloud-detection now checks both; (4) `DB_PATH`/`STATE_PATH` defaulted to `/data/...`, which doesn't exist in Cloud Run (that path assumed a locally-bind-mounted volume) — both now explicitly override to `/tmp/...` via `--set-env-vars`.
+
+**Not yet done:** the full-archive sync (`MAX_POSTS=0`) — the capped test proved the pipeline works, but the complete backlog hasn't been pulled into Cloud Run's copy of the DB.
+
+**Next up:** Phase 7 — Cloud Scheduler. Its plan also needed correcting: since the scraper is a Job (not a Service), Cloud Scheduler can't just POST to a service URL — it has to call the Cloud Run Admin API's job-execution endpoint instead. Full corrected command is in `CLAUDE.md`.
 
 **Branch:** all of this session's work (Phase 4 auth fix, session-expiry detection, Phase 5 GCP infra, Phase 6 app.py fix) is on `gcp_deploy`, pushed to `origin/gcp_deploy` on GitHub (this repo is public — `github.com/CSHv1/likarchive`). `main` is unaffected. Continue Phase 6 work on `gcp_deploy`; merge to `main` via PR once Cloud Run deployment is verified end-to-end.
 
@@ -57,13 +63,12 @@ HEADLESS=false MAX_POSTS=5 python scraper.py
 - Headful, 5 posts, confirm text/author/URL/timestamp populate in SQLite.
 - Fix selectors if drifted. (Bonus: this reloads the whole codebase into my head.)
 
-### Step 2 — Next build: Phase 6 (Cloud Run deployment)
+### Step 2 — Next build: Phase 7 (Cloud Scheduler)
 
-Phases 3–5 are all done: GUI, containerisation (including the `storage_state()` auth fix), and GCP infra (SA, bucket, secret, IAM all provisioned on `csh-data-engineering-on-gcp`). Next:
-- Push image to Artifact Registry (`europe-west2-docker.pkg.dev/csh-data-engineering-on-gcp/likarchive/likarchive:latest`)
-- Deploy scraper service (no public URL, `--service-account likarchive-sa@csh-data-engineering-on-gcp.iam.gserviceaccount.com`, `--set-env-vars GCP_PROJECT=csh-data-engineering-on-gcp`)
-- Deploy GUI service (`app.py`'s `download_db()`/`init_db()` wiring already fixed and verified — see above)
-- Staging test: full-archive sync (`MAX_POSTS=0`) triggered manually, verify count + spot-check GUI
+Phases 3–6 are all done, including a fully verified Cloud Run deployment (scraper Job + GUI Service, capped test passed). Next:
+- Full-archive sync: `gcloud run jobs execute likarchive-scraper --region europe-west2 --update-env-vars=MAX_POSTS=0 --wait` — flag this before running, same as any live LinkedIn action; this pulls the *entire* saved-posts backlog in one go
+- Cloud Scheduler daily job — targets the Cloud Run Admin API job-run endpoint, not a service URL (corrected plan, see `CLAUDE.md` Phase 7)
+- Cloud Monitoring alert policy on scraper execution failures (also Phase 7)
 
 *Why this order:* "running headless on Cloud Run, daily schedule, secrets managed properly" is the sentence that anchors a Staff/Principal conversation.
 
@@ -74,8 +79,8 @@ Phases 3–5 are all done: GUI, containerisation (including the `storage_state()
 - **Phase 3** — Flask GUI (cards, filters, FTS) ✅
 - **Phase 4** — Containerise (Dockerfile ✅, `.dockerignore` ✅, GUI verified ✅, scraper `storage_state()` auth fix verified ✅) ✅
 - **Phase 5** — GCP infra (SA ✅, Secret Manager ✅, GCS bucket ✅, IAM ✅ — all on `csh-data-engineering-on-gcp`) ✅
-- **Phase 6** — Cloud Run deploy (scraper + UI services) + full-archive staging test ← **next**
-- **Phase 7** — Cloud Scheduler (`0 7 * * *`, OIDC, `likarchive-sa`) ⬜
+- **Phase 6** — Cloud Run deploy (scraper Job ✅, UI Service ✅, capped staging test ✅ — full-archive sync still pending) ✅
+- **Phase 7** — Cloud Scheduler (`0 7 * * *`, Cloud Run Admin API job-run target, `likarchive-sa`) ← **next**
 - **Phase 8** — BigQuery sink (`bq_sink.py` → `likarchive.liked_posts`) + LookML model ⬜ (optional)
 
 ## Local quickstart (reminder)
@@ -94,4 +99,5 @@ HEADLESS=false MAX_POSTS=5 python scraper.py
 - [x] Session-expiry detection + GUI banner added (2026-07-23)
 - [x] Phase 5 GCP infra fully provisioned on `csh-data-engineering-on-gcp` (2026-07-23)
 - [x] app.py GCS DB sync fix (+ db_sync.py project fix) — verified against real bucket via ADC (2026-07-23)
-- [ ] Next concrete task: start Phase 6 (Artifact Registry push, Cloud Run deploy)
+- [x] Phase 6 complete — Cloud Run Job + Service deployed, capped test scraped 5 real posts end-to-end (2026-07-29)
+- [ ] Next concrete task: full-archive sync, then start Phase 7 (Cloud Scheduler)
