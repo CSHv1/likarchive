@@ -31,6 +31,16 @@ This deploy surfaced four real, non-obvious bugs (all fixed, all detailed in `CL
 
 **Not yet done:** the full-archive sync (`MAX_POSTS=0`) — the capped test proved the pipeline works, but the complete backlog hasn't been pulled into Cloud Run's copy of the DB.
 
+**⚠️ `likarchive-ui` is currently locked down (2026-07-29 end of session)** — public access (`allUsers` invoker) was deliberately removed overnight since there was no need to leave a personal project's GUI publicly reachable while unattended. Note: neither Cloud Run resource actually "runs" or costs anything while idle regardless (the scraper is a Job that only executes when triggered — nothing is scheduled yet in Phase 7 — and the GUI Service scales to zero with no traffic), so this was a precaution, not a required safety step. To restore public access next session:
+
+```bash
+export PATH="/usr/local/share/google-cloud-sdk/bin:$PATH"
+export CLOUDSDK_PYTHON="/Users/conradhallpro/.pyenv/versions/3.10.11/bin/python3"
+gcloud run services add-iam-policy-binding likarchive-ui \
+  --project=csh-data-engineering-on-gcp --region=europe-west2 \
+  --member="allUsers" --role="roles/run.invoker"
+```
+
 **Next up:** Phase 7 — Cloud Scheduler. Its plan also needed correcting: since the scraper is a Job (not a Service), Cloud Scheduler can't just POST to a service URL — it has to call the Cloud Run Admin API's job-execution endpoint instead. Full corrected command is in `CLAUDE.md`.
 
 **Branch:** all of this session's work (Phase 4 auth fix, session-expiry detection, Phase 5 GCP infra, Phase 6 app.py fix) is on `gcp_deploy`, pushed to `origin/gcp_deploy` on GitHub (this repo is public — `github.com/CSHv1/likarchive`). `main` is unaffected. Continue Phase 6 work on `gcp_deploy`; merge to `main` via PR once Cloud Run deployment is verified end-to-end.
