@@ -83,17 +83,19 @@ def tag_post(client: anthropic.Anthropic, author_name: str, post_text: str) -> l
     return []
 
 
-def run(args: argparse.Namespace) -> None:
+def tag_posts(conn, limit: int = 0, rerun: bool = False) -> int:
+    """
+    Tag untagged posts (or all posts, if rerun) on an already-open connection.
+    Returns the number of posts successfully tagged. Caller owns the
+    connection (commit/close) — this only commits per-post tag writes.
+    Used both by the CLI below and by scraper.py's run_sync().
+    """
     if not ANTHROPIC_API_KEY:
-        raise SystemExit(
-            "ANTHROPIC_API_KEY not set. Add it to your .env file."
-        )
+        print("[tagger] ANTHROPIC_API_KEY not set — skipping auto-tagging.")
+        return 0
 
-    init_db(DB_PATH)
-    conn = get_connection(DB_PATH)
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-
-    posts = fetch_untagged(conn, limit=args.limit, rerun=args.rerun)
+    posts = fetch_untagged(conn, limit=limit, rerun=rerun)
     print(f"[tagger] {len(posts)} post(s) to tag (model={MODEL})\n")
 
     tagged = 0
@@ -119,8 +121,15 @@ def run(args: argparse.Namespace) -> None:
         if i < len(posts):
             time.sleep(SLEEP_BETWEEN_CALLS)
 
-    conn.close()
     print(f"\n[tagger] Done — tagged {tagged}/{len(posts)} posts.")
+    return tagged
+
+
+def run(args: argparse.Namespace) -> None:
+    init_db(DB_PATH)
+    conn = get_connection(DB_PATH)
+    tag_posts(conn, limit=args.limit, rerun=args.rerun)
+    conn.close()
 
 
 if __name__ == "__main__":

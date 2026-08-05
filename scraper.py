@@ -88,8 +88,18 @@ def parse_card(card) -> Optional[dict]:
 AUTH_FAILURE_MARKERS = ("/login", "/authwall", "/checkpoint")
 
 
-def scrape_saves(page, conn, log_id: int) -> dict:
-    counts = {"seen": 0, "new": 0, "updated": 0, "skipped": 0}
+def scrape_saves(page, conn, log_id: int, counts: dict, checkpoint=None) -> dict:
+    # counts is mutated in place (not reassigned) so partial progress is
+    # still visible to the caller if an exception aborts the scrape midway —
+    # see run_sync()'s exception handling.
+    #
+    # checkpoint(), if given, is called after every scroll batch commit to
+    # upload the DB to GCS immediately rather than waiting for the whole
+    # scrape to finish. Cloud Run's task-timeout is a hard kill, not a
+    # catchable Python exception — the normal end-of-run upload in
+    # run_sync()'s finally block never executes if that fires, so on a long
+    # scrape (confirmed: a full-archive run can exceed even a 1-hour
+    # timeout) every bit of progress would otherwise be lost, every time.
     seen_urls: set[str] = set()
 
     print(f"[scraper] Navigating to saved posts: {SAVES_URL}")
@@ -114,7 +124,17 @@ def scrape_saves(page, conn, log_id: int) -> dict:
         cards = page.query_selector_all('[data-chameleon-result-urn*="urn:li:activity"]')
 
         for card in cards:
-            post = parse_card(card)
+            try:
+                post = parse_card(card)
+            except Exception as e:
+                # LinkedIn virtualizes the DOM on long lists — a card can go
+                # stale mid-extraction (e.g. ElementHandle.get_attribute
+                # timeout) as you scroll past it. Skip this one card rather
+                # than aborting a run that may have hundreds of good posts
+                # left to go.
+                print(f"  [SKIP-ERR] Failed to parse a card: {e}")
+                continue
+
             if not post or post["post_url"] in seen_urls:
                 continue
 
@@ -135,6 +155,8 @@ def scrape_saves(page, conn, log_id: int) -> dict:
                 return counts
 
         conn.commit()  # Commit after each scroll batch
+        if checkpoint:
+            checkpoint()
 
         # Scroll down
         new_height = page.evaluate("document.body.scrollHeight")
@@ -177,6 +199,11 @@ def run_sync() -> None:
     conn = get_connection(DB_PATH)
     log_id = start_sync_log(conn)
 
+    checkpoint_fn = None
+    if in_cloud_run:
+        from db_sync import upload_db
+        checkpoint_fn = lambda: upload_db(DB_PATH)
+
     error_msg = None
     counts = {"seen": 0, "new": 0, "updated": 0, "skipped": 0}
 
@@ -204,14 +231,30 @@ def run_sync() -> None:
             )
             page = context.new_page()
 
-            counts = scrape_saves(page, conn, log_id)
+            scrape_saves(page, conn, log_id, counts, checkpoint=checkpoint_fn)
 
             context.close()
             browser.close()
 
+            # Only tag on a clean, complete scrape — not after a timeout/crash,
+            # so tagging never competes with the scrape's own time budget on a
+            # run that's still trying to make it through a long backlog.
+            from tagger import tag_posts
+            tag_posts(conn)
+            conn.commit()
+            if checkpoint_fn:
+                checkpoint_fn()
+
     except Exception as e:
         error_msg = traceback.format_exc()
         print(f"[sync] ERROR: {e}")
+        raise  # re-raise after cleanup below, so this isn't silently a "success":
+               # scraper.py run directly (or via Cloud Run) exits non-zero on an
+               # uncaught exception by default, which is what lets Cloud Run (and
+               # any Phase 7 Monitoring alert built on execution failures) see
+               # this as failed. scheduler.py's job() catches Exception around
+               # run_sync() for its own daily-loop retry logic, so that use case
+               # is unaffected.
 
     finally:
         finish_sync_log(conn, log_id, counts, error=error_msg)

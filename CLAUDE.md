@@ -16,7 +16,7 @@ db_sync.py           — GCS download_db()/upload_db() — no-op locally, active
 cloud_auth.py        — Secret Manager fetch_auth_state() — no-op locally, active only when K_SERVICE is set (Phase 5)
 scheduler.py         — Daily cron wrapper around scraper.run_sync()
 query.py             — CLI browser/search: recent posts, FTS search, author filter
-tagger.py            — Claude API auto-tagger (claude-haiku-4-5-20251001)
+tagger.py            — Claude API auto-tagger (claude-haiku-4-5-20251001); tag_posts() called automatically from scraper.py after a clean scrape
 app.py               — Flask web UI — search, filter, browse saved posts (Phase 3)
 templates/index.html — Single-page vanilla JS frontend served by app.py
 requirements.txt
@@ -48,7 +48,7 @@ python scheduler.py           # daily auto-sync (runs immediately, then 08:00 da
 | `MAX_POSTS`         | `0`                 | Cap per sync run — 0 = unlimited                                                     |
 | `BROWSER_PROFILE`   | `browser_profile`   | Playwright persistent profile dir — headed local debugging only, not read at runtime |
 | `STATE_PATH`        | `auth_state.json`   | Portable Playwright `storage_state()` export — what `scraper.py` actually loads      |
-| `ANTHROPIC_API_KEY` | —                   | Claude API key (required for `tagger.py`)                                            |
+| `ANTHROPIC_API_KEY` | —                   | Claude API key — required for `tagger.py`'s `tag_posts()`, now called automatically from `scraper.py`'s `run_sync()` after a clean scrape (not on error/timeout). Locally from `.env`; in Cloud Run, mounted from the `anthropic-api-key` Secret Manager secret via `--set-secrets` (native Cloud Run mechanism — no custom fetch code needed, unlike `auth_state.json`) |
 | `K_SERVICE`         | —                   | Set automatically by Cloud Run — presence toggles the `db_sync.py`/`cloud_auth.py` calls in `run_sync()`. Never set locally. |
 | `GCP_PROJECT`       | —                   | GCP project ID — required by `cloud_auth.py` when `K_SERVICE` is set (Phase 5)       |
 | `GCS_BUCKET`        | `likarchive-db`     | GCS bucket for SQLite persistence (Phase 5)                                          |
@@ -220,7 +220,16 @@ Live resources (region `europe-west2`, project `csh-data-engineering-on-gcp`):
 - [x] Deploy GUI as a Cloud Run Service: `likarchive-sa`, 512Mi memory, public (`--allow-unauthenticated`), `GCP_PROJECT`/`GCS_BUCKET`/`DB_PATH` env vars, `--command gunicorn --args="--bind","0.0.0.0:8080","app:app"`
   - `--min-instances=1` not yet set — GUI will cold-start on the first request after idling; revisit if that latency matters
 - [x] Capped staging test (not the full `MAX_POSTS=0` archive — deliberately small first, per established practice for anything touching the live LinkedIn account): `gcloud run jobs execute likarchive-scraper --update-env-vars=MAX_POSTS=5 --wait` — 5 real posts scraped, uploaded to `gs://likarchive-db`, confirmed served correctly by the GUI after a forced revision refresh
-- [ ] Full-archive sync (`MAX_POSTS=0`) — not yet run; the capped test proved the pipeline, but the complete backlog hasn't been pulled into Cloud Run's copy of the DB yet
+- [~] Full-archive sync (`MAX_POSTS=0`) — in progress across multiple runs (see below); this account has hundreds of saved posts spanning a long time, and a single run hasn't yet made it to the true end of the list
+
+**Full-archive backfill surfaced four more real bugs, all fixed — this is the reliability hardening pass, separate from the four deploy bugs above:**
+
+5. **A single run can't necessarily finish the whole backlog.** First attempt hit the 900s task-timeout partway through; bumped to 3600s (1h, Cloud Run Jobs support up to 24h). Even at 1h, a full backfill on a large backlog may take multiple runs — see the checkpointing fix below for why that's fine.
+6. **Cloud Run's task-timeout is a hard kill, not a catchable exception** — `finally` blocks never run, so the original design (upload the DB once, at the very end of `run_sync()`) meant a run that timed out lost **100% of its progress**, every time, confirmed when a run that visibly scraped 200+ posts left the bucket completely unchanged. Fixed: `scrape_saves()` now takes an optional `checkpoint` callback (wired to `upload_db()` when in Cloud Run) and calls it after every scroll-batch commit, not just at the end. This also means a full backfill no longer needs one giant successful run — each run, even one that fails partway, permanently banks its progress, so just re-running enough times converges on the full backlog.
+7. **Counts silently zeroed out on any mid-scrape exception.** `run_sync()` assigned `counts = scrape_saves(...)`; if the function raised before returning, the outer `counts` was never updated, so `sync_log` recorded `error, posts_seen=0` even when hundreds of posts had genuinely been saved. Fixed: `scrape_saves()` now takes `counts` as a parameter and mutates it in place, so partial progress is visible regardless of how the call ends.
+8. **Failures never made the process exit non-zero.** `run_sync()` caught every exception, logged it, and returned normally — Cloud Run saw exit code 0 (success) even on a real failure, which would have silently defeated the Phase 7 Monitoring alert (built on execution failures) before it's even built. Fixed: the exception handler now re-raises after cleanup, so an uncaught exception produces Python's normal non-zero exit in Cloud Run, while `scheduler.py`'s `job()` (which already catches `Exception` around `run_sync()` for its own daily-retry loop) is unaffected.
+- Also made per-card extraction resilient: a single stale DOM handle (LinkedIn virtualizes the list on long scrolls) no longer aborts the whole run — one bad card is now skipped and logged, not fatal.
+- Observed failure modes while converging on the full backlog, for reference: task-timeout (fixed by raising the limit), a Playwright `ElementHandle` timeout on a stale card (fixed by per-card try/except), a Chromium `Target crashed` (fixed by bumping Job memory 2Gi → 4Gi — classic renderer OOM signature on a very long-lived page), and one Cloud Run platform-level `Internal error` with exit code 0 (transient infra hiccup, not our code — resolved by simply retrying).
 
 ### Phase 7 — Cloud Scheduler
 
