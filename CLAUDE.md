@@ -231,15 +231,18 @@ Live resources (region `europe-west2`, project `csh-data-engineering-on-gcp`):
 - Also made per-card extraction resilient: a single stale DOM handle (LinkedIn virtualizes the list on long scrolls) no longer aborts the whole run — one bad card is now skipped and logged, not fatal.
 - Observed failure modes while converging on the full backlog, for reference: task-timeout (fixed by raising the limit), a Playwright `ElementHandle` timeout on a stale card (fixed by per-card try/except), a Chromium `Target crashed` (fixed by bumping Job memory 2Gi → 4Gi — classic renderer OOM signature on a very long-lived page), and one Cloud Run platform-level `Internal error` with exit code 0 (transient infra hiccup, not our code — resolved by simply retrying).
 
-### Phase 7 — Cloud Scheduler (mostly complete)
+### Phase 7 — Cloud Scheduler (complete)
 
 **Plan corrected from the original roadmap**: this assumed the scraper was a Cloud Run Service reachable by a plain HTTP POST to its URL. Since Phase 6 established it has to be a Cloud Run **Job** instead (see Phase 6 notes), there is no service URL to POST to — Cloud Scheduler has to call the Cloud Run Admin API's job-execution endpoint instead.
 
 - [x] Grant `likarchive-sa` `roles/run.invoker` on the `likarchive-scraper` Job specifically (separate from its bucket/secret grants — needed for the Admin API `:run` call)
 - [x] Create daily sync job — `likarchive-daily-sync`, `0 7 * * *` UTC, targets `POST https://europe-west2-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/csh-data-engineering-on-gcp/jobs/likarchive-scraper:run` via OAuth token (not OIDC — this is a direct Admin API call, not a Cloud Run Service invocation) as `likarchive-sa`
 - [x] Test trigger manually: `gcloud scheduler jobs run likarchive-daily-sync --location europe-west2` — confirmed working end-to-end; the resulting execution's `RUN BY` field showed `likarchive-sa@...`, not a personal account, proving the service-account auth chain works
-- [ ] Verify via Cloud Run logs that a *real scheduled* (not manually forced) run completes and uploads — will naturally confirm at the next 07:00 UTC firing
-- [ ] Cloud Monitoring alert policy on `likarchive-scraper` execution failures — pushes a notification (email at minimum) instead of relying on noticing the GUI banner or checking logs manually. Closes the last gap in session-expiry visibility (see Key design decisions); the scraper already fails loudly and distinctly on auth expiry, this just makes that failure page someone instead of sitting in Cloud Logging
+- [x] Cloud Monitoring alert policy on `likarchive-scraper` execution failures
+  - Email notification channel created for `conradsamuelhall@gmail.com` (`gcloud beta monitoring channels create`) — note this needed `gcloud components install beta` first (same one-time setup hiccup as the earlier billing beta-component issue)
+  - Policy condition: `run.googleapis.com/job/completed_execution_count` metric, filtered to `resource.labels.job_name="likarchive-scraper" AND metric.labels.result="failed"`, threshold > 0 over a 5-minute window. Label values (`result="failed"`) were confirmed against real time-series data before writing the policy, not assumed from docs — `gcloud beta monitoring metrics-descriptors` doesn't exist; had to query the Monitoring API directly (`.../v3/projects/{p}/metricDescriptors` and `.../timeSeries`) via `curl` with a `gcloud auth print-access-token` bearer token
+  - Created via `gcloud beta monitoring policies create --policy-from-file=...` (a JSON policy definition — no simple flag-only form for a filter this specific)
+- [ ] Verify via Cloud Run logs that a *real scheduled* (not manually forced) run completes and uploads — will naturally confirm at the next 07:00 UTC firing; the alert policy will also get a real-world test the next time a run fails (the ongoing backfill-plateau runs are a likely candidate)
 
 ### Phase 8 — BigQuery sink (optional, for Looker)
 
