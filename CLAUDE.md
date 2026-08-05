@@ -220,7 +220,7 @@ Live resources (region `europe-west2`, project `csh-data-engineering-on-gcp`):
 - [x] Deploy GUI as a Cloud Run Service: `likarchive-sa`, 512Mi memory, public (`--allow-unauthenticated`), `GCP_PROJECT`/`GCS_BUCKET`/`DB_PATH` env vars, `--command gunicorn --args="--bind","0.0.0.0:8080","app:app"`
   - `--min-instances=1` not yet set — GUI will cold-start on the first request after idling; revisit if that latency matters
 - [x] Capped staging test (not the full `MAX_POSTS=0` archive — deliberately small first, per established practice for anything touching the live LinkedIn account): `gcloud run jobs execute likarchive-scraper --update-env-vars=MAX_POSTS=5 --wait` — 5 real posts scraped, uploaded to `gs://likarchive-db`, confirmed served correctly by the GUI after a forced revision refresh
-- [~] Full-archive sync (`MAX_POSTS=0`) — in progress across multiple runs (see below); this account has hundreds of saved posts spanning a long time, and a single run hasn't yet made it to the true end of the list
+- [~] Full-archive sync (`MAX_POSTS=0`) — **deferred at 483 posts** (2026-08-05). Grew steadily across runs (5 → 285 → 483) via checkpointing, but the next three consecutive full-hour runs all landed on **exactly 0 new posts** each time — confirmed via logs (`[NEW` count = 0, `[SKIPPED` count in the hundreds each run). This is not a resource problem: bumped memory 2Gi→4Gi (fixed an earlier Chromium crash, didn't move this number) and CPU 1→2 vCPU (also no effect) with zero change to the plateau. Most likely a LinkedIn-side soft limit on infinite-scroll depth within one continuous session — `document.body.scrollHeight` apparently still fluctuates enough (ads/sidebar/other page elements) to keep resetting the stale-scroll counter without the post *list* actually advancing, so the loop burns the full hour instead of correctly detecting "nothing new is coming." Needs diagnostic logging (actual DOM card count per scroll, not just `scrollHeight`) to characterize precisely — deferred, tracked as a todo, not blocking Phase 7 (daily incremental syncs never scroll anywhere near this deep, so they won't hit it). 483 tagged, real posts is a solid working archive for now.
 
 **Full-archive backfill surfaced four more real bugs, all fixed — this is the reliability hardening pass, separate from the four deploy bugs above:**
 
@@ -231,17 +231,14 @@ Live resources (region `europe-west2`, project `csh-data-engineering-on-gcp`):
 - Also made per-card extraction resilient: a single stale DOM handle (LinkedIn virtualizes the list on long scrolls) no longer aborts the whole run — one bad card is now skipped and logged, not fatal.
 - Observed failure modes while converging on the full backlog, for reference: task-timeout (fixed by raising the limit), a Playwright `ElementHandle` timeout on a stale card (fixed by per-card try/except), a Chromium `Target crashed` (fixed by bumping Job memory 2Gi → 4Gi — classic renderer OOM signature on a very long-lived page), and one Cloud Run platform-level `Internal error` with exit code 0 (transient infra hiccup, not our code — resolved by simply retrying).
 
-### Phase 7 — Cloud Scheduler
+### Phase 7 — Cloud Scheduler (mostly complete)
 
 **Plan corrected from the original roadmap**: this assumed the scraper was a Cloud Run Service reachable by a plain HTTP POST to its URL. Since Phase 6 established it has to be a Cloud Run **Job** instead (see Phase 6 notes), there is no service URL to POST to — Cloud Scheduler has to call the Cloud Run Admin API's job-execution endpoint instead.
 
-- [ ] Create daily sync job
-  - Frequency: `0 7 * * *` (07:00 UTC daily)
-  - Target: `POST https://europe-west2-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/csh-data-engineering-on-gcp/jobs/likarchive-scraper:run`
-  - Auth: OAuth token (not OIDC — this is a direct Cloud Run Admin API call, not a Cloud Run Service invocation) with `likarchive-sa`, which needs `roles/run.invoker` on the job in addition to its existing bucket/secret grants
-  - `gcloud scheduler jobs create http likarchive-daily-sync --schedule "0 7 * * *" --uri "https://europe-west2-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/csh-data-engineering-on-gcp/jobs/likarchive-scraper:run" --http-method POST --oauth-service-account-email likarchive-sa@csh-data-engineering-on-gcp.iam.gserviceaccount.com --location europe-west2`
-- [ ] Test trigger manually: `gcloud scheduler jobs run likarchive-daily-sync --location europe-west2`
-- [ ] Verify via Cloud Run logs that sync completed and DB was uploaded back to GCS
+- [x] Grant `likarchive-sa` `roles/run.invoker` on the `likarchive-scraper` Job specifically (separate from its bucket/secret grants — needed for the Admin API `:run` call)
+- [x] Create daily sync job — `likarchive-daily-sync`, `0 7 * * *` UTC, targets `POST https://europe-west2-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/csh-data-engineering-on-gcp/jobs/likarchive-scraper:run` via OAuth token (not OIDC — this is a direct Admin API call, not a Cloud Run Service invocation) as `likarchive-sa`
+- [x] Test trigger manually: `gcloud scheduler jobs run likarchive-daily-sync --location europe-west2` — confirmed working end-to-end; the resulting execution's `RUN BY` field showed `likarchive-sa@...`, not a personal account, proving the service-account auth chain works
+- [ ] Verify via Cloud Run logs that a *real scheduled* (not manually forced) run completes and uploads — will naturally confirm at the next 07:00 UTC firing
 - [ ] Cloud Monitoring alert policy on `likarchive-scraper` execution failures — pushes a notification (email at minimum) instead of relying on noticing the GUI banner or checking logs manually. Closes the last gap in session-expiry visibility (see Key design decisions); the scraper already fails loudly and distinctly on auth expiry, this just makes that failure page someone instead of sitting in Cloud Logging
 
 ### Phase 8 — BigQuery sink (optional, for Looker)
