@@ -15,6 +15,7 @@ HEADLESS          = os.getenv("HEADLESS", "false").lower() == "true"
 SCROLL_PAUSE_MS   = int(os.getenv("SCROLL_PAUSE_MS", "2000"))
 MAX_POSTS         = int(os.getenv("MAX_POSTS", "0"))
 STATE_PATH        = os.getenv("STATE_PATH", "auth_state.json")
+MAX_CONSECUTIVE_SKIPPED = int(os.getenv("MAX_CONSECUTIVE_SKIPPED", "40"))
 
 SAVES_URL = "https://www.linkedin.com/my-items/saved-posts/?savedPostType=ALL"
 
@@ -118,6 +119,7 @@ def scrape_saves(page, conn, log_id: int, counts: dict, checkpoint=None) -> dict
     last_height = 0
     stale_scrolls = 0
     MAX_STALE = 4  # Stop after N scrolls with no new content
+    consecutive_skipped = 0  # Stop after N already-known posts in a row — see below
 
     while True:
         # Collect all post cards currently in the DOM
@@ -143,6 +145,7 @@ def scrape_saves(page, conn, log_id: int, counts: dict, checkpoint=None) -> dict
 
             result = upsert_post(conn, post)
             counts[result] += 1
+            consecutive_skipped = consecutive_skipped + 1 if result == "skipped" else 0
 
             print(
                 f"  [{result.upper():7s}] {post['author_name'] or '(unknown)'} — "
@@ -157,6 +160,19 @@ def scrape_saves(page, conn, log_id: int, counts: dict, checkpoint=None) -> dict
         conn.commit()  # Commit after each scroll batch
         if checkpoint:
             checkpoint()
+
+        # Saved posts come back newest-first, so a long run of already-known,
+        # unchanged posts means we've reached previously-synced territory —
+        # no need to keep scrolling. This catches what the scrollHeight check
+        # above often misses: ads/sidebar content can keep the page height
+        # changing indefinitely even once the post list itself has stopped
+        # advancing, which used to burn the full task-timeout on every run.
+        if MAX_CONSECUTIVE_SKIPPED and consecutive_skipped >= MAX_CONSECUTIVE_SKIPPED:
+            print(
+                f"[scraper] {consecutive_skipped} already-known posts in a row — "
+                "reached previously-synced content. Stopping."
+            )
+            break
 
         # Scroll down
         new_height = page.evaluate("document.body.scrollHeight")
@@ -202,7 +218,17 @@ def run_sync() -> None:
     checkpoint_fn = None
     if in_cloud_run:
         from db_sync import upload_db
-        checkpoint_fn = lambda: upload_db(DB_PATH)
+        from tagger import tag_posts
+
+        def checkpoint_fn():
+            # Tag whatever's new before uploading, so a run that later gets
+            # hard-killed by the task-timeout has still tagged everything it
+            # found so far — tag_posts() only ever selects untagged rows, so
+            # this is a cheap no-op query on every checkpoint except the ones
+            # right after a new post actually landed.
+            tag_posts(conn)
+            conn.commit()
+            upload_db(DB_PATH)
 
     error_msg = None
     counts = {"seen": 0, "new": 0, "updated": 0, "skipped": 0}
@@ -236,9 +262,10 @@ def run_sync() -> None:
             context.close()
             browser.close()
 
-            # Only tag on a clean, complete scrape — not after a timeout/crash,
-            # so tagging never competes with the scrape's own time budget on a
-            # run that's still trying to make it through a long backlog.
+            # Final catch-all — in_cloud_run already tags incrementally on
+            # every checkpoint (see checkpoint_fn above), but local runs have
+            # no checkpoint, and this also covers anything created between
+            # the last checkpoint and a clean finish.
             from tagger import tag_posts
             tag_posts(conn)
             conn.commit()

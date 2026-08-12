@@ -18,7 +18,7 @@ init_db(DB_PATH)
 def _build_posts_query(q, tags, author, date_from, date_to, for_count=False):
     select = "SELECT COUNT(*)" if for_count else (
         "SELECT lp.post_url, lp.author_name, lp.author_profile, "
-        "lp.post_text, lp.post_timestamp, lp.scraped_at"
+        "lp.post_text, lp.post_timestamp, lp.post_date, lp.scraped_at"
     )
     params = []
 
@@ -50,7 +50,7 @@ def _build_posts_query(q, tags, author, date_from, date_to, for_count=False):
         params.append(date_from)
 
     if date_to:
-        where += " AND lp.post_date < ?"
+        where += " AND lp.post_date <= ?"
         params.append(date_to)
 
     sql = f"{select} {from_clause} {where}"
@@ -106,6 +106,7 @@ def get_posts():
                 "author_profile": row["author_profile"] or "",
                 "post_text":     row["post_text"] or "",
                 "post_timestamp": row["post_timestamp"] or "",
+                "post_date":     row["post_date"] or "",
                 "scraped_at":    (row["scraped_at"] or "")[:10],
                 "tags":          [t["name"] for t in post_tags],
             })

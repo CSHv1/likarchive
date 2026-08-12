@@ -450,11 +450,11 @@
       <div id="time-list" class="date-picker">
         <div class="date-row">
           <span class="date-lbl">From</span>
-          <select id="from-date" class="date-sel"><option value="">Any</option></select>
+          <input type="date" id="from-date" class="date-sel">
         </div>
         <div class="date-row">
           <span class="date-lbl">To</span>
-          <select id="to-date" class="date-sel"><option value="">Any</option></select>
+          <input type="date" id="to-date" class="date-sel">
         </div>
         <div id="date-clear-row" style="display:none">
           <span id="date-clear-btn" class="date-clear-link">Clear dates</span>
@@ -500,7 +500,7 @@ const MONTHS = [
 // ── Init ─────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   loadSidebar();
-  initDateSelects();
+  initDatePickers();
   fetchPosts();
   checkSyncStatus();
 
@@ -602,8 +602,8 @@ async function fetchPosts(append = false) {
   const p = new URLSearchParams({ page: S.page });
   if (S.q)      p.set('q', S.q);
   if (S.author) p.set('author', S.author);
-  if (S.fromDate) p.set('date_from', S.fromDate + '-01');
-  if (S.toDate)   p.set('date_to', nextMonthFirst(S.toDate));
+  if (S.fromDate) p.set('date_from', S.fromDate);
+  if (S.toDate)   p.set('date_to', S.toDate);
   S.tags.forEach(t => p.append('tags', t));
 
   try {
@@ -660,7 +660,7 @@ function cardHtml(post) {
     <div class="card-head">
       <span class="card-author">${esc(post.author_name || '(unknown)')}</span>
       <span class="card-right">
-        ${post.post_timestamp ? `<span class="card-ts">${esc(post.post_timestamp)}</span>` : ''}
+        ${post.post_date ? `<span class="card-ts">${esc(post.post_date)}</span>` : ''}
         <a class="card-link" href="${esc(post.post_url)}" target="_blank" rel="noopener noreferrer">Open →</a>
       </span>
     </div>
@@ -704,7 +704,7 @@ function renderChips() {
     html += `<span class="chip" data-type="author" data-v="${esc(S.author)}">${esc(S.author)} <span class="x">×</span></span>`;
   }
   if (S.fromDate || S.toDate) {
-    const fmt = ym => { const [y,m] = ym.split('-'); return MONTHS[+m-1][1]+' '+y; };
+    const fmt = ymd => { const [y,m,d] = ymd.split('-'); return `${+d} ${MONTHS[+m-1][1]} ${y}`; };
     const dateLabel = S.fromDate && S.toDate ? `${fmt(S.fromDate)} → ${fmt(S.toDate)}`
       : S.fromDate ? `From ${fmt(S.fromDate)}` : `Until ${fmt(S.toDate)}`;
     html += `<span class="chip" data-type="date">${esc(dateLabel)} <span class="x">×</span></span>`;
@@ -761,20 +761,7 @@ function syncSidebarSelected() {
 }
 
 // ── Date helpers ──────────────────────────────────────────────────────────
-function initDateSelects() {
-  // Generate "YYYY-MM" options from Jan 2023 to current month
-  const now = new Date();
-  const opts = [];
-  for (let y = 2023; y <= now.getFullYear(); y++) {
-    const maxM = y === now.getFullYear() ? now.getMonth() + 1 : 12;
-    for (let m = 1; m <= maxM; m++) {
-      const val = `${y}-${String(m).padStart(2, '0')}`;
-      opts.push(`<option value="${val}">${MONTHS[m-1][1]} ${y}</option>`);
-    }
-  }
-  const html = opts.reverse().join('');
-  document.getElementById('from-date').insertAdjacentHTML('beforeend', html);
-  document.getElementById('to-date').insertAdjacentHTML('beforeend', html);
+function initDatePickers() {
   document.getElementById('from-date').addEventListener('change', onDateChange);
   document.getElementById('to-date').addEventListener('change', onDateChange);
 }
@@ -785,13 +772,6 @@ function onDateChange() {
   document.getElementById('date-clear-row').style.display =
     (S.fromDate || S.toDate) ? '' : 'none';
   reset();
-}
-
-function nextMonthFirst(yearMonth) {
-  const [y, m] = yearMonth.split('-').map(Number);
-  const nm = m === 12 ? 1 : m + 1;
-  const ny = m === 12 ? y + 1 : y;
-  return `${ny}-${String(nm).padStart(2, '0')}-01`;
 }
 
 // ── Utils ─────────────────────────────────────────────────────────────────
