@@ -1,0 +1,64 @@
+name: Deploy
+
+# GUI-only auto-deploy, deliberately. The scraper Job (`likarchive-scraper`)
+# touches a live LinkedIn session on a daily Cloud Scheduler trigger — a bad
+# push auto-changing what code runs against it next, with no human in the
+# loop, is a different risk profile than the read-only GUI. This workflow
+# builds and pushes the scraper's image too (same tag), so it's ready, but
+# deliberately does NOT run `gcloud run jobs update likarchive-scraper`.
+# Update it by hand when ready:
+#   gcloud run jobs update likarchive-scraper \
+#     --image=europe-west2-docker.pkg.dev/csh-data-engineering-on-gcp/likarchive/likarchive:<sha> \
+#     --region=europe-west2
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+env:
+  PROJECT_ID: csh-data-engineering-on-gcp
+  REGION: europe-west2
+  IMAGE: europe-west2-docker.pkg.dev/csh-data-engineering-on-gcp/likarchive/likarchive
+
+permissions:
+  contents: read
+  id-token: write # required for WIF
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker europe-west2-docker.pkg.dev --quiet
+
+      - name: Build image
+        run: |
+          docker build --platform linux/amd64 \
+            -t "${IMAGE}:latest" \
+            -t "${IMAGE}:${{ github.sha }}" \
+            .
+
+      - name: Push image
+        run: |
+          docker push "${IMAGE}:latest"
+          docker push "${IMAGE}:${{ github.sha }}"
+
+      - name: Deploy GUI (likarchive-ui) only
+        run: |
+          gcloud run services update likarchive-ui \
+            --project="${PROJECT_ID}" \
+            --region="${REGION}" \
+            --image="${IMAGE}:${{ github.sha }}"

@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Likarchive</title>
+  <script>window.__CLERK_PUBLISHABLE_KEY = "{{ clerk_publishable_key }}";</script>
   <style>
     :root {
       --bg:            #F6F8FB;
@@ -409,15 +410,36 @@
       border-radius: 4px;
       font-size: 11.5px;
     }
+
+    /* Clerk auth gate */
+    #auth-gate {
+      display: none;
+      width: 100vw;
+      height: 100vh;
+      align-items: center;
+      justify-content: center;
+      background: var(--bg);
+    }
+    #auth-gate.visible { display: flex; }
+    #app-shell { display: contents; }
+    #app-shell.hidden { display: none; }
+
+    #user-button { flex-shrink: 0; }
   </style>
 </head>
 <body>
+
+<!-- ── Clerk auth gate ─────────────────────────────────────────────────── -->
+<div id="auth-gate"><div id="sign-in"></div></div>
+
+<div id="app-shell" class="hidden">
 
 <!-- ── Sidebar ─────────────────────────────────────────────────────────── -->
 <aside id="sidebar">
   <div class="sb-header">
     <div class="sb-logo">Likarchive</div>
     <div class="sb-tagline">Your LinkedIn knowledge library</div>
+    <div id="user-button"></div>
   </div>
 
   <nav class="sb-nav">
@@ -483,6 +505,8 @@
   <div id="content"><div class="spinner">Loading…</div></div>
 </main>
 
+</div><!-- /#app-shell -->
+
 <script>
 // ── State ────────────────────────────────────────────────────────────────
 const S = {
@@ -497,8 +521,81 @@ const MONTHS = [
   ['09','Sep'],['10','Oct'],['11','Nov'],['12','Dec']
 ];
 
+// ── Clerk auth gate ──────────────────────────────────────────────────────
+function loadScript(src, dataAttrs = {}) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.defer = true;
+    s.crossOrigin = 'anonymous';
+    for (const [k, v] of Object.entries(dataAttrs)) s.setAttribute(k, v);
+    s.onload = resolve;
+    s.onerror = () => reject(new Error(`Failed to load ${src}`));
+    document.head.appendChild(s);
+  });
+}
+
+function clerkFapiUrl(pk) {
+  const b64 = pk.replace(/^pk_(test|live)_/, '');
+  return atob(b64).replace(/\$$/, '');
+}
+
+async function authFetch(url, opts = {}) {
+  const token = window.Clerk?.session ? await window.Clerk.session.getToken() : null;
+  const headers = Object.assign({}, opts.headers, token ? { Authorization: `Bearer ${token}` } : {});
+  return fetch(url, Object.assign({}, opts, { headers }));
+}
+
+async function initClerkAuth() {
+  const pk = window.__CLERK_PUBLISHABLE_KEY;
+  if (!pk) {
+    document.getElementById('sign-in').innerHTML =
+      '<div class="empty"><strong>Clerk is not configured</strong>Set CLERK_PUBLISHABLE_KEY.</div>';
+    document.getElementById('auth-gate').classList.add('visible');
+    return;
+  }
+  const fapi = clerkFapiUrl(pk);
+  await loadScript(`https://${fapi}/npm/@clerk/ui@1/dist/ui.browser.js`);
+  await loadScript(
+    `https://${fapi}/npm/@clerk/clerk-js@6/dist/clerk.browser.js`,
+    { 'data-clerk-publishable-key': pk },
+  );
+
+  await window.Clerk.load({ ui: { ClerkUI: window.__internal_ClerkUICtor } });
+
+  const showApp = () => {
+    document.getElementById('auth-gate').classList.remove('visible');
+    document.getElementById('app-shell').classList.remove('hidden');
+    const ub = document.getElementById('user-button');
+    if (!ub.childElementCount) window.Clerk.mountUserButton(ub);
+    initApp();
+  };
+
+  const showSignIn = () => {
+    document.getElementById('app-shell').classList.add('hidden');
+    const gate = document.getElementById('auth-gate');
+    gate.classList.add('visible');
+    const signInDiv = document.getElementById('sign-in');
+    if (!signInDiv.childElementCount) window.Clerk.mountSignIn(signInDiv);
+  };
+
+  if (window.Clerk.isSignedIn) showApp(); else showSignIn();
+
+  window.Clerk.addListener(({ user }) => {
+    if (user && document.getElementById('app-shell').classList.contains('hidden')) {
+      location.reload();
+    }
+  });
+}
+
 // ── Init ─────────────────────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', initClerkAuth);
+
+let appInitialized = false;
+function initApp() {
+  if (appInitialized) return;
+  appInitialized = true;
+
   loadSidebar();
   initDatePickers();
   fetchPosts();
@@ -565,13 +662,13 @@ document.addEventListener('DOMContentLoaded', () => {
     if (type === 'author') toggleAuthor(chip.dataset.v);
     if (type === 'date')   clearDate();
   });
-});
+}
 
 // ── Sync status ──────────────────────────────────────────────────────────
 async function checkSyncStatus() {
   const banner = document.getElementById('sync-banner');
   try {
-    const s = await fetch('/api/sync_status').then(r => r.json());
+    const s = await authFetch('/api/sync_status').then(r => r.json());
     if (s.status !== 'error') { banner.className = ''; return; }
 
     const when = s.finished_at ? new Date(s.finished_at).toLocaleString() : 'unknown time';
@@ -587,8 +684,8 @@ async function checkSyncStatus() {
 // ── Data ─────────────────────────────────────────────────────────────────
 async function loadSidebar() {
   const [tags, authors] = await Promise.all([
-    fetch('/api/tags').then(r => r.json()),
-    fetch('/api/authors').then(r => r.json()),
+    authFetch('/api/tags').then(r => r.json()),
+    authFetch('/api/authors').then(r => r.json()),
   ]);
   renderTagList(tags);
   renderAuthorList(authors);
@@ -607,7 +704,7 @@ async function fetchPosts(append = false) {
   S.tags.forEach(t => p.append('tags', t));
 
   try {
-    const data = await fetch('/api/posts?' + p).then(r => r.json());
+    const data = await authFetch('/api/posts?' + p).then(r => r.json());
     S.pages = data.pages || 1;
 
     const countEl = document.getElementById('result-count');

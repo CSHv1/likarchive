@@ -2,11 +2,13 @@ import os
 from flask import Flask, render_template, jsonify, request
 from dotenv import load_dotenv
 from db import get_connection, init_db
+from clerk_auth import require_auth
 
 load_dotenv()
 
 app = Flask(__name__)
 DB_PATH = os.getenv("DB_PATH", "linkedin_likes.db")
+CLERK_PUBLISHABLE_KEY = os.getenv("CLERK_PUBLISHABLE_KEY")
 
 if os.getenv("K_SERVICE"):
     from db_sync import download_db
@@ -61,10 +63,11 @@ def _build_posts_query(q, tags, author, date_from, date_to, for_count=False):
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", clerk_publishable_key=CLERK_PUBLISHABLE_KEY)
 
 
 @app.route("/api/posts")
+@require_auth
 def get_posts():
     q         = request.args.get("q", "").strip()
     tags      = request.args.getlist("tags")
@@ -123,6 +126,7 @@ def get_posts():
 
 
 @app.route("/api/tags")
+@require_auth
 def get_tags():
     conn = get_connection(DB_PATH)
     rows = conn.execute(
@@ -135,6 +139,7 @@ def get_tags():
 
 
 @app.route("/api/authors")
+@require_auth
 def get_authors():
     conn = get_connection(DB_PATH)
     rows = conn.execute(
@@ -147,6 +152,7 @@ def get_authors():
 
 
 @app.route("/api/sync_status")
+@require_auth
 def get_sync_status():
     conn = get_connection(DB_PATH)
     row = conn.execute(
