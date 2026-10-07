@@ -4,23 +4,29 @@
 
 ## What this project is
 
-A Python/Playwright scraper that logs into LinkedIn, navigates to the saved-posts page (`/my-items/saved-posts/`), paginates the full list via infinite scroll, auto-tags posts via Claude Haiku, and stores everything in SQLite. Runs on Cloud Run (Job for the scraper, Service for the GUI), triggered daily by Cloud Scheduler, with Cloud Monitoring alerting on failures. End goal: a shipped, owned, end-to-end thing — cloud-native, scheduled, secrets done properly. **As of 2026-08-06, that goal is achieved** — all 7 planned phases are complete. `post_mvp` (merged to `main` 2026-08-12) then fixed the backfill-plateau/tagging bug below and added absolute dates + a calendar date-range picker to the GUI.
+A Python/Playwright scraper that logs into LinkedIn, navigates to the saved-posts page (`/my-items/saved-posts/`), paginates the full list via infinite scroll, auto-tags posts via Claude Haiku, and stores everything in SQLite. Runs on Cloud Run (Job for the scraper, Service for the GUI), triggered daily by Cloud Scheduler, with Cloud Monitoring alerting on failures. End goal: a shipped, owned, end-to-end thing — cloud-native, scheduled, secrets done properly. **As of 2026-08-06, that goal is achieved** — all 7 planned phases are complete. `post_mvp` (merged to `main` 2026-08-12) then fixed the backfill-plateau/tagging bug below and added absolute dates + a calendar date-range picker to the GUI. **As of 2026-10-07, the GUI also requires sign-in (Clerk) and deploys itself via GitHub Actions on every push to `main`** — see Phase 9.
 
 ## Current state
 
 **Live on GCP** (project `csh-data-engineering-on-gcp`, region `europe-west2`):
-- Scraper: Cloud Run **Job** `likarchive-scraper` — `gcloud run jobs execute likarchive-scraper --region europe-west2`
-- GUI: Cloud Run **Service** `likarchive-ui` — `https://likarchive-ui-588295099118.europe-west2.run.app`
-- Storage: `gs://likarchive-db` (SQLite DB), Secret Manager (`linkedin-auth-state`, `anthropic-api-key`)
+- Scraper: Cloud Run **Job** `likarchive-scraper` — `gcloud run jobs execute likarchive-scraper --region europe-west2`. Image **pinned to a specific digest** (not `:latest` — see Phase 9), so it's unaffected by GUI deploys; update deliberately with `gcloud run jobs update likarchive-scraper --image=...@sha256:...`.
+- GUI: Cloud Run **Service** `likarchive-ui` — `https://likarchive-ui-588295099118.europe-west2.run.app` — **now requires Clerk sign-in** (open sign-up: anyone with the link can create an account). Auto-deploys on every push to `main` via GitHub Actions.
+- Storage: `gs://likarchive-db` (SQLite DB), Secret Manager (`linkedin-auth-state`, `anthropic-api-key`, `clerk-secret-key`)
 - Scheduler: `likarchive-daily-sync`, fires `0 7 * * *` UTC via the Cloud Run Admin API (not a service URL — the scraper is a Job, see below)
 - Monitoring: alert policy on `likarchive-scraper` execution failures → email to `conradsamuelhall@gmail.com`
-- **485 real posts archived and fully tagged**, confirmed served correctly by the GUI. Daily incremental runs now complete in ~1m15s (was previously hitting the 1h/2h task-timeout every time — see Known open items history below).
+- CI/CD: `.github/workflows/deploy.yml` — WIF-authenticated (no stored keys), builds + pushes the image, deploys `likarchive-ui` only on push to `main`. Zero manual deploy steps for the GUI now; the scraper Job still updates manually, on purpose.
+- **485 real posts archived and fully tagged**, confirmed served correctly by the GUI (now behind sign-in). Daily incremental runs now complete in ~1m15s (was previously hitting the 1h/2h task-timeout every time — see Known open items history below).
 
-**Branch:** `post_mvp` merged into `main` 2026-08-12 (fast-forward). `main` is current and deployed. Public repo — `github.com/CSHv1/likarchive`.
+**Branch:** `post_mvp` merged into `main` 2026-08-12 (fast-forward); CI/CD + Clerk work merged into `main` 2026-10-07 (`post_mvp_cicd`, fast-forward). `main` is current and deployed. Public repo — `github.com/CSHv1/likarchive`.
 
 ## Known open items (not blocking, tracked as tasks)
 
 1. **GUI still shares the scraper's 2GB Chromium-inclusive image**, despite never touching a browser. Deferred optimization — split into a lightweight image once there's a reason to prioritize it (cold-start latency, storage cost).
+2. **Dockerfile's explicit `COPY` file list is still drift-prone.** Bit us twice now (Phase 6: `db_sync.py`/`cloud_auth.py`; Phase 9: `clerk_auth.py`) — every new top-level module needs a manual Dockerfile edit or the container crash-loops with `ModuleNotFoundError`, invisible until something actually imports it at runtime. Worth replacing with a pattern that can't drift (e.g. `COPY . .` plus a tightened `.dockerignore`) next time this file gets touched.
+
+### Resolved (2026-10-07) — was open, keeping the history for context
+
+**GUI was fully public, deploys were 100% manual.** Added Clerk auth (app-layer auth boundary, Cloud Run ingress stays public) and GitHub Actions CI/CD (Workload Identity Federation, GUI-only auto-deploy). Full writeup, including three bugs caught along the way (Dockerfile COPY drift recurrence, an over-broad IAM grant caught before use, and a mutable-tag gap that would have silently exposed the scraper Job to new images), in `CLAUDE.md`'s Phase 9 section.
 
 ### Resolved (2026-08-12) — was open, keeping the history for context
 
@@ -36,6 +42,8 @@ A Python/Playwright scraper that logs into LinkedIn, navigates to the saved-post
 - **Scraper = Cloud Run Job, GUI = Cloud Run Service** — not interchangeable. The scraper has no HTTP listener and can never pass a Service's port health-check; Jobs are the correct primitive for run-to-completion, non-HTTP work. Corollary: Jobs set `CLOUD_RUN_JOB`, not `K_SERVICE` — `scraper.py`'s cloud-detection checks both.
 - **`/tmp`, not `/data`**, for `DB_PATH`/`STATE_PATH` in Cloud Run — `/data` was a local-Docker-only convention (bind-mounted volume) that doesn't exist in Cloud Run's filesystem.
 - **Always `docker build --platform linux/amd64`** — this Mac is Apple Silicon; Cloud Run needs `amd64`, fails with a cryptic `exec format error` otherwise.
+- **Clerk auth**: `clerk_auth.py`'s `require_auth` decorator gates every `/api/*` route in `app.py` — active in *every* environment (not gated on `K_SERVICE`/`CLOUD_RUN_JOB` like `db_sync.py`/`cloud_auth.py`), since a logged-out browser should see the sign-in screen locally too. Cloud Run ingress itself stays public; Clerk is the actual auth boundary, at the app layer.
+- **CI/CD auto-deploys the GUI only.** The scraper Job's image is pinned to a specific digest and is never touched by `.github/workflows/deploy.yml` — update it deliberately with `gcloud run jobs update likarchive-scraper --image=...@sha256:...` when ready. Don't let the Job's image drift back onto a mutable `:latest` tag — that's what silently re-exposes it to every future GUI deploy (see Phase 9's bug #3 in `CLAUDE.md`).
 
 ## Environment notes
 
@@ -47,6 +55,7 @@ A Python/Playwright scraper that logs into LinkedIn, navigates to the saved-post
 - Local testing of `db_sync.py`/`cloud_auth.py` needs `gcloud auth application-default login` (separate from the CLI's `gcloud auth login`).
 - `git push` to the public repo: `git -c credential.helper=store push ...` avoids a hang on the system `osxkeychain` credential helper trying to show a GUI prompt with no display attached.
 - **Public-repo caution**: scan for billing account IDs or credential material before committing anything documenting GCP setup — project IDs/service account emails/bucket/secret *names* are fine (IAM controls access, not obscurity), but billing account IDs and any actual key/token material are not.
+- **`gh` CLI isn't installed, and Homebrew can't build it** — the Xcode Command Line Tools on this machine are too outdated for `brew install gh` to build its `go` dependency from source. Workaround that worked: download the precompiled binary directly from `https://github.com/cli/cli/releases` (the macOS arm64 `.zip` asset), unzip, and run it standalone — no build step needed. It doesn't persist anywhere permanent yet (was run from `/tmp` last time), so this may need re-downloading next session. `gh auth login --web` is interactive (device code + browser approval) — needs you, not scriptable.
 
 ## Local quickstart (reminder)
 
@@ -69,6 +78,7 @@ HEADLESS=false MAX_POSTS=5 python scraper.py
 - **Phase 7** — Cloud Scheduler + Monitoring alert ✅
 - **`post_mvp`** — plateau/tagging fix + absolute dates + calendar date-range picker ✅ (merged to `main` 2026-08-12)
 - **Phase 8** — BigQuery sink (`bq_sink.py` → `likarchive.liked_posts`) + LookML model ⬜ (optional, not started)
+- **Phase 9** — CI/CD (GitHub Actions + WIF) + Clerk auth for the GUI ✅ (merged to `main` 2026-10-07)
 
 ## Session log
 
@@ -81,4 +91,9 @@ HEADLESS=false MAX_POSTS=5 python scraper.py
 - [x] `post_mvp`: root-caused the backfill plateau as the actual cause of stalled tagging (two new posts landed untagged); added early-stop on consecutive already-known posts + moved tagging onto every checkpoint; switched GUI to absolute `YYYY-MM-DD` dates + native calendar date-range picker (`date_to` inclusive) (2026-08-09)
 - [x] `post_mvp` deployed: image rebuilt/pushed, both the scraper Job and GUI Service redeployed; live run confirmed early-stop working (1m17s vs. ~1h before); also found and fixed a second bug — `anthropic-api-key` Secret Manager value had stray literal quote characters (a `.env`-parsing artifact never caught before because Cloud Run tagging had never completed a full run), pushed a corrected secret version; re-ran and confirmed the two previously-untagged posts got tagged (2026-08-12)
 - [x] `post_mvp` merged into `main` (fast-forward) (2026-08-12)
-- [ ] Next concrete task: your call — split the GUI image (open item above), or start Phase 8 (optional)
+- [x] Phase 9 built on `post_mvp_cicd`: Clerk auth (`clerk_auth.py`, gates all `/api/*` routes, sign-in screen in `index.html`) + GitHub Actions CI/CD (`.github/workflows/deploy.yml`, WIF-authenticated, GUI-only auto-deploy) — GCP-side WIF pool/provider/`likarchive-ci` SA and `clerk-secret-key` secret all provisioned; verified locally (401 signed-out, real Clerk sign-in works) before touching `main` (2026-09-04, session paused here — GitHub repo variables not yet set)
+- [x] Resumed after a month-long gap: confirmed via GitHub's Actions API that zero workflow runs had ever fired (nothing had reached `main` yet) and all GCP resources were still intact; installed `gh` CLI via a precompiled binary (Homebrew's build failed on outdated Xcode tools) to set the two missing GitHub repo variables (2026-10-07)
+- [x] Merged `post_mvp_cicd` → `main` and pushed — triggered the first-ever Actions run. It succeeded, but the deployed revision crash-looped (`ModuleNotFoundError: No module named 'clerk_auth'` — Dockerfile `COPY` list drift, same bug class as Phase 6). Fixed and pushed again; second run succeeded and the new revision came up clean (2026-10-07)
+- [x] Caught and fixed two more issues surfaced by having a real CI/CD pipeline for the first time: an `iam.serviceAccountUser` grant that had been scoped to the whole project instead of just `likarchive-sa` (corrected before anything used it), and the scraper Job referencing the mutable `:latest` tag instead of a pinned digest, which would have silently exposed it to future GUI-only deploys — pinned to its last known-good pre-Clerk digest (2026-10-07)
+- [x] End-to-end verified in production: unauthenticated `likarchive-ui` requests get the Clerk sign-in screen and a 401 on `/api/*`; real Clerk SSO sign-in confirmed working against the live 485-post archive (2026-10-07)
+- [ ] Next concrete task: your call — split the GUI image (open item above), fix the Dockerfile COPY-drift pattern properly (open item above), or start Phase 8 (optional)
