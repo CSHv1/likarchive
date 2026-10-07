@@ -1,5 +1,6 @@
 # Credentials and local state — never bake these into the image
 .env
+.env.example
 browser_profile/
 auth_state.json
 linkedin_likes.db
@@ -10,10 +11,15 @@ __pycache__/
 *.pyc
 *.pyo
 venv/
+.DS_Store
 
-# Git
+# Git, CI, and editor/tooling config — not needed at runtime
 .git/
 .gitignore
+.github/
+.claude/
+Dockerfile
+.dockerignore
 
 # Scratch files and docs — not needed at runtime
 page_dump.html

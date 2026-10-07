@@ -8,9 +8,15 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code only — credentials, DB, and browser profile stay outside
-COPY scraper.py db.py tagger.py app.py scheduler.py query.py save_session.py db_sync.py cloud_auth.py clerk_auth.py ./
-COPY templates/ ./templates/
+# Copy everything not excluded by .dockerignore — deliberately not an explicit
+# per-file COPY list. That pattern drifted twice (db_sync.py/cloud_auth.py in
+# Phase 5, clerk_auth.py in Phase 9): a new top-level module is easy to forget
+# adding here, and the resulting ModuleNotFoundError only surfaces at runtime,
+# not at build time. .dockerignore is the actual safety boundary now — it's an
+# exclude-list (credentials, DB, docs, local tooling config) instead of an
+# include-list, so a new .py file is included by default and nothing sensitive
+# reaches the image unless someone also edits .dockerignore to allow it.
+COPY . .
 
 # Container defaults — all can be overridden at docker run / Cloud Run env vars.
 # DB and auth state live under /data so a single volume mount covers both.

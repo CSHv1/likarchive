@@ -22,7 +22,10 @@ A Python/Playwright scraper that logs into LinkedIn, navigates to the saved-post
 ## Known open items (not blocking, tracked as tasks)
 
 1. **GUI still shares the scraper's 2GB Chromium-inclusive image**, despite never touching a browser. Deferred optimization — split into a lightweight image once there's a reason to prioritize it (cold-start latency, storage cost).
-2. **Dockerfile's explicit `COPY` file list is still drift-prone.** Bit us twice now (Phase 6: `db_sync.py`/`cloud_auth.py`; Phase 9: `clerk_auth.py`) — every new top-level module needs a manual Dockerfile edit or the container crash-loops with `ModuleNotFoundError`, invisible until something actually imports it at runtime. Worth replacing with a pattern that can't drift (e.g. `COPY . .` plus a tightened `.dockerignore`) next time this file gets touched.
+
+### Resolved (2026-10-07, later same day) — was open, keeping the history for context
+
+**Dockerfile's explicit `COPY` file list was drift-prone.** Bit us twice (Phase 6: `db_sync.py`/`cloud_auth.py`; Phase 9: `clerk_auth.py`) before actually being fixed — every new top-level module needed a manual Dockerfile edit or the container crash-looped with `ModuleNotFoundError`, invisible until something actually imported it at runtime. Replaced with `COPY . .` plus a hardened `.dockerignore` (now also excludes `.claude/`, `.github/`, `.DS_Store`, `.env.example`, and the Dockerfile/`.dockerignore` themselves). Verified locally: built the image, inspected `/app` directly to confirm every expected file present and every excluded path genuinely absent, then booted both entrypoints (`gunicorn app:app` and `python -c "import scraper"`) to confirm clean startup before this ever touched a real deploy.
 
 ### Resolved (2026-10-07) — was open, keeping the history for context
 
@@ -96,4 +99,5 @@ HEADLESS=false MAX_POSTS=5 python scraper.py
 - [x] Merged `post_mvp_cicd` → `main` and pushed — triggered the first-ever Actions run. It succeeded, but the deployed revision crash-looped (`ModuleNotFoundError: No module named 'clerk_auth'` — Dockerfile `COPY` list drift, same bug class as Phase 6). Fixed and pushed again; second run succeeded and the new revision came up clean (2026-10-07)
 - [x] Caught and fixed two more issues surfaced by having a real CI/CD pipeline for the first time: an `iam.serviceAccountUser` grant that had been scoped to the whole project instead of just `likarchive-sa` (corrected before anything used it), and the scraper Job referencing the mutable `:latest` tag instead of a pinned digest, which would have silently exposed it to future GUI-only deploys — pinned to its last known-good pre-Clerk digest (2026-10-07)
 - [x] End-to-end verified in production: unauthenticated `likarchive-ui` requests get the Clerk sign-in screen and a 401 on `/api/*`; real Clerk SSO sign-in confirmed working against the live 485-post archive (2026-10-07)
-- [ ] Next concrete task: your call — split the GUI image (open item above), fix the Dockerfile COPY-drift pattern properly (open item above), or start Phase 8 (optional)
+- [x] Fixed the Dockerfile COPY-drift pattern for good: switched to `COPY . .` + hardened `.dockerignore` (added `.claude/`, `.github/`, `.DS_Store`, `.env.example`, Dockerfile/`.dockerignore` themselves); verified locally by inspecting the built image's `/app` contents and booting both entrypoints before pushing (2026-10-07)
+- [ ] Next concrete task: your call — split the GUI image (open item above), or start Phase 8 (optional)
