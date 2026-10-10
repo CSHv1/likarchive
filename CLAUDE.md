@@ -18,8 +18,12 @@ scheduler.py         — Daily cron wrapper around scraper.run_sync()
 query.py             — CLI browser/search: recent posts, FTS search, author filter
 tagger.py            — Claude API auto-tagger (claude-haiku-4-5-20251001); tag_posts() called automatically from scraper.py after a clean scrape
 app.py               — Flask web UI — search, filter, browse saved posts (Phase 3)
+clerk_auth.py        — Clerk require_auth Flask decorator, gates all /api/* routes (Phase 9)
 templates/index.html — Single-page vanilla JS frontend served by app.py
-requirements.txt
+requirements.txt     — Full deps, used by the scraper's Dockerfile (heavy, Chromium-inclusive)
+requirements-ui.txt  — GUI-only deps subset, used by Dockerfile.ui (lightweight, Phase 9 follow-up)
+Dockerfile           — Scraper image (Playwright/Chromium) — also what likarchive-scraper runs
+Dockerfile.ui        — GUI-only image (python:3.11-slim, no browser) — what likarchive-ui runs
 .env.example         — Copy to .env and fill in credentials
 CLAUDE.md            — This file
 NOTES.md             — Current state, known issues, next steps
@@ -279,3 +283,5 @@ Two real gaps closed: every deploy had been 100% manual (`docker build`/`push`/`
 3. **Scraper Job silently exposed to new images via the shared `:latest` tag.** The "scraper stays manual" design only holds if the Job's image reference is actually frozen — but `gcloud run jobs describe` showed it stored the tag `likarchive:latest`, not a digest. Since the CI/CD pipeline pushes a new `:latest` on every GUI deploy, the scraper's *next execution* would have silently picked up the Clerk-era image too, defeating the intended isolation even though no one ran `gcloud run jobs update`. Fixed by pinning the Job explicitly to its last known-good pre-Clerk digest (found via `gcloud artifacts docker images list --include-tags`, matching the 2026-08-12 `post_mvp` push): `gcloud run jobs update likarchive-scraper --image=...@sha256:3420426a...`. Going forward, the scraper Job only changes via an explicit digest/tag update, never implicitly.
 
 Verified end-to-end in production: unauthenticated requests to `likarchive-ui` get a Clerk sign-in screen (and a 401 on `/api/*`), real sign-in via Clerk SSO works and shows the actual 485-post archive, and `likarchive-scraper`'s image is confirmed pinned and untouched by the GUI-only deploy.
+
+**Follow-up (2026-10-10): GUI split onto its own lightweight image.** `likarchive-ui` never touches a browser but had been sharing the scraper's Playwright/Chromium-inclusive image (2.13GB) since Phase 4 — a deferred optimization finally picked up here. New `Dockerfile.ui` (`python:3.11-slim` base) + `requirements-ui.txt` (just `flask`/`gunicorn`/`python-dotenv`/`google-cloud-storage`/`clerk-backend-api`/`httpx` — `db.py` itself is pure stdlib) builds a 224MB image, roughly a 90% reduction. Deliberately an **explicit `COPY` allowlist** (`app.py db.py db_sync.py clerk_auth.py` + `templates/`) rather than the main Dockerfile's `COPY . .` — opposite risk direction: the main Dockerfile's fix was about under-inclusion (a new first-party module silently missing), while this image's risk is over-inclusion, so a new module earning a place in the lean image should be a deliberate choice, not something swept in by default. `deploy.yml` now builds/pushes/deploys only `likarchive-ui:<sha>` from `Dockerfile.ui`, fully decoupled from the scraper's image — CI no longer touches the heavy image at all, not even to build it; it's built/pushed/updated by hand exactly like before CI/CD existed, consistent with the scraper's manual-update design. Verified locally before ever pushing (image contents inspected, both `/` and `/api/*` behavior confirmed identical to the old shared image) and end-to-end in production after deploy (new revision confirmed running `likarchive-ui@sha256:...`, zero errors, scraper Job confirmed still untouched).

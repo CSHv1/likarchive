@@ -10,18 +10,22 @@ A Python/Playwright scraper that logs into LinkedIn, navigates to the saved-post
 
 **Live on GCP** (project `csh-data-engineering-on-gcp`, region `europe-west2`):
 - Scraper: Cloud Run **Job** `likarchive-scraper` — `gcloud run jobs execute likarchive-scraper --region europe-west2`. Image **pinned to a specific digest** (not `:latest` — see Phase 9), so it's unaffected by GUI deploys; update deliberately with `gcloud run jobs update likarchive-scraper --image=...@sha256:...`.
-- GUI: Cloud Run **Service** `likarchive-ui` — `https://likarchive-ui-588295099118.europe-west2.run.app` — **now requires Clerk sign-in** (open sign-up: anyone with the link can create an account). Auto-deploys on every push to `main` via GitHub Actions.
+- GUI: Cloud Run **Service** `likarchive-ui` — `https://likarchive-ui-588295099118.europe-west2.run.app` — **now requires Clerk sign-in** (open sign-up: anyone with the link can create an account). Auto-deploys on every push to `main` via GitHub Actions. Runs its own lightweight image (`likarchive-ui`, built from `Dockerfile.ui` — ~224MB, no Playwright/Chromium), fully decoupled from the scraper's heavy image.
 - Storage: `gs://likarchive-db` (SQLite DB), Secret Manager (`linkedin-auth-state`, `anthropic-api-key`, `clerk-secret-key`)
 - Scheduler: `likarchive-daily-sync`, fires `0 7 * * *` UTC via the Cloud Run Admin API (not a service URL — the scraper is a Job, see below)
 - Monitoring: alert policy on `likarchive-scraper` execution failures → email to `conradsamuelhall@gmail.com`
-- CI/CD: `.github/workflows/deploy.yml` — WIF-authenticated (no stored keys), builds + pushes the image, deploys `likarchive-ui` only on push to `main`. Zero manual deploy steps for the GUI now; the scraper Job still updates manually, on purpose.
+- CI/CD: `.github/workflows/deploy.yml` — WIF-authenticated (no stored keys), builds + pushes `Dockerfile.ui`'s image, deploys `likarchive-ui` only on push to `main`. Zero manual deploy steps for the GUI now; the scraper Job (still on the heavy `Dockerfile`/`likarchive` image) is fully untouched by CI — build/push/update it by hand, exactly the pre-CI/CD flow.
 - **485 real posts archived and fully tagged**, confirmed served correctly by the GUI (now behind sign-in). Daily incremental runs now complete in ~1m15s (was previously hitting the 1h/2h task-timeout every time — see Known open items history below).
 
 **Branch:** `post_mvp` merged into `main` 2026-08-12 (fast-forward); CI/CD + Clerk work merged into `main` 2026-10-07 (`post_mvp_cicd`, fast-forward). `main` is current and deployed. Public repo — `github.com/CSHv1/likarchive`.
 
 ## Known open items (not blocking, tracked as tasks)
 
-1. **GUI still shares the scraper's 2GB Chromium-inclusive image**, despite never touching a browser. Deferred optimization — split into a lightweight image once there's a reason to prioritize it (cold-start latency, storage cost).
+None open right now — the last two (Dockerfile COPY-list drift, GUI sharing the scraper's heavy image) were both resolved 2026-10-10. See resolved history below.
+
+### Resolved (2026-10-10) — was open, keeping the history for context
+
+**GUI shared the scraper's 2GB Chromium-inclusive image**, despite never touching a browser. Split onto its own lightweight image: `Dockerfile.ui` (`python:3.11-slim`) + `requirements-ui.txt` (just the GUI's actual deps — `db.py` itself is pure stdlib), explicit `COPY` allowlist rather than `COPY . .` (opposite risk direction from the main Dockerfile's fix — here over-inclusion is the risk, not under-inclusion). Result: 224MB vs. 2.13GB, ~90% smaller. `deploy.yml` now builds/pushes/deploys only this image for `likarchive-ui`; CI no longer touches the scraper's heavy image at all. Verified locally (image contents, both entrypoints) and in production (new revision confirmed on the new image, zero errors, scraper Job confirmed still untouched) before and after pushing. Full writeup in `CLAUDE.md`'s Phase 9 section (follow-up note).
 
 ### Resolved (2026-10-07, later same day) — was open, keeping the history for context
 
@@ -100,4 +104,5 @@ HEADLESS=false MAX_POSTS=5 python scraper.py
 - [x] Caught and fixed two more issues surfaced by having a real CI/CD pipeline for the first time: an `iam.serviceAccountUser` grant that had been scoped to the whole project instead of just `likarchive-sa` (corrected before anything used it), and the scraper Job referencing the mutable `:latest` tag instead of a pinned digest, which would have silently exposed it to future GUI-only deploys — pinned to its last known-good pre-Clerk digest (2026-10-07)
 - [x] End-to-end verified in production: unauthenticated `likarchive-ui` requests get the Clerk sign-in screen and a 401 on `/api/*`; real Clerk SSO sign-in confirmed working against the live 485-post archive (2026-10-07)
 - [x] Fixed the Dockerfile COPY-drift pattern for good: switched to `COPY . .` + hardened `.dockerignore` (added `.claude/`, `.github/`, `.DS_Store`, `.env.example`, Dockerfile/`.dockerignore` themselves); verified locally by inspecting the built image's `/app` contents and booting both entrypoints before pushing (2026-10-07)
-- [ ] Next concrete task: your call — split the GUI image (open item above), or start Phase 8 (optional)
+- [x] Split the GUI onto its own lightweight image: new `Dockerfile.ui` + `requirements-ui.txt`, `deploy.yml` updated to build/push/deploy only this image for `likarchive-ui` and no longer touch the scraper's heavy image at all. 224MB vs. 2.13GB. Verified locally (image contents, both entrypoints) and in production (new revision confirmed, zero errors, scraper Job confirmed untouched) (2026-10-10)
+- [ ] Next concrete task: your call — start Phase 8 (optional), or move on to the planned RAG layer (Vertex AI embeddings + BigQuery vector search, hand-built per the original project plan)
