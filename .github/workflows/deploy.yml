@@ -3,13 +3,16 @@ name: Deploy
 # GUI-only auto-deploy, deliberately. The scraper Job (`likarchive-scraper`)
 # touches a live LinkedIn session on a daily Cloud Scheduler trigger — a bad
 # push auto-changing what code runs against it next, with no human in the
-# loop, is a different risk profile than the read-only GUI. This workflow
-# builds and pushes the scraper's image too (same tag), so it's ready, but
-# deliberately does NOT run `gcloud run jobs update likarchive-scraper`.
-# Update it by hand when ready:
-#   gcloud run jobs update likarchive-scraper \
-#     --image=europe-west2-docker.pkg.dev/csh-data-engineering-on-gcp/likarchive/likarchive:<sha> \
-#     --region=europe-west2
+# loop, is a different risk profile than the read-only GUI.
+#
+# Since the GUI split onto its own lightweight image (Dockerfile.ui — no
+# Playwright/Chromium, ~224MB vs. the scraper's ~2.1GB), this workflow no
+# longer touches the scraper's image at all, not even to build it. The two
+# are now fully decoupled: build/push/update the scraper image by hand,
+# exactly the same manual flow as before CI/CD existed —
+#   docker build --platform linux/amd64 -t <IMAGE>:<tag> .
+#   docker push <IMAGE>:<tag>
+#   gcloud run jobs update likarchive-scraper --image=<IMAGE>:<tag> --region=europe-west2
 
 on:
   push:
@@ -19,7 +22,7 @@ on:
 env:
   PROJECT_ID: csh-data-engineering-on-gcp
   REGION: europe-west2
-  IMAGE: europe-west2-docker.pkg.dev/csh-data-engineering-on-gcp/likarchive/likarchive
+  IMAGE_UI: europe-west2-docker.pkg.dev/csh-data-engineering-on-gcp/likarchive/likarchive-ui
 
 permissions:
   contents: read
@@ -44,21 +47,22 @@ jobs:
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker europe-west2-docker.pkg.dev --quiet
 
-      - name: Build image
+      - name: Build GUI image
         run: |
           docker build --platform linux/amd64 \
-            -t "${IMAGE}:latest" \
-            -t "${IMAGE}:${{ github.sha }}" \
+            -f Dockerfile.ui \
+            -t "${IMAGE_UI}:latest" \
+            -t "${IMAGE_UI}:${{ github.sha }}" \
             .
 
-      - name: Push image
+      - name: Push GUI image
         run: |
-          docker push "${IMAGE}:latest"
-          docker push "${IMAGE}:${{ github.sha }}"
+          docker push "${IMAGE_UI}:latest"
+          docker push "${IMAGE_UI}:${{ github.sha }}"
 
       - name: Deploy GUI (likarchive-ui) only
         run: |
           gcloud run services update likarchive-ui \
             --project="${PROJECT_ID}" \
             --region="${REGION}" \
-            --image="${IMAGE}:${{ github.sha }}"
+            --image="${IMAGE_UI}:${{ github.sha }}"

@@ -1,0 +1,25 @@
+# Lightweight image for the GUI only (likarchive-ui) — no Playwright/Chromium,
+# since app.py never touches a browser. Split out from the main Dockerfile
+# (which stays Chromium-inclusive for the scraper) to cut image size/cold
+# start/storage cost for the Cloud Run Service.
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements-ui.txt .
+RUN pip install --no-cache-dir -r requirements-ui.txt
+
+# Explicit allowlist, not `COPY . .` — deliberately the opposite direction from
+# the main Dockerfile's fix. There, the risk was under-inclusion (a new
+# first-party module silently missing at runtime), so the fix was to default
+# to including everything. Here the risk is the opposite: this image is
+# supposed to stay small, so a new module should be an explicit, considered
+# addition rather than something that silently bloats the GUI image back up.
+COPY app.py db.py db_sync.py clerk_auth.py ./
+COPY templates/ ./templates/
+
+ENV DB_PATH=/data/linkedin_likes.db
+
+EXPOSE 8080
+
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "app:app"]
