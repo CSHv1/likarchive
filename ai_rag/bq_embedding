@@ -1,0 +1,87 @@
+"""Adding of bq embedding as a table derived from liked posts."""
+
+import logging
+import os
+
+from google.cloud import bigquery
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
+
+GCP_PROJECT = os.getenv("GCP_PROJECT")
+BQ_DATASET = os.getenv("BQ_DATASET", "likarchive")
+ENDPOINT = os.getenv("ENDPOINT", "text-embedding-005")
+MODEL_ID = os.getenv("EMBEDDING_MODEL", "linkedinposts_text_embedding")
+CONNECTION = os.getenv(
+    "CONNECTION",
+    "csh-data-engineering-on-gcp.europe-west2.likarchive_vertex_conn",
+)
+SOURCE_TABLE_ID = f"{GCP_PROJECT}.{BQ_DATASET}.liked_posts"
+EMBEDDING_TABLE_ID = f"{GCP_PROJECT}.{BQ_DATASET}.liked_posts_embedding"
+\
+
+def _client() -> bigquery.Client:
+    """Initializes and returns a single BigQuery client."""
+    return bigquery.Client(project=GCP_PROJECT)
+
+
+def _ensure_embedding_model(client: bigquery.Client) -> None:
+    """Stage 1: Ensures the remote embedding model exists in the dataset."""
+    project = client.project or GCP_PROJECT
+    full_model_path = f"`{project}.{BQ_DATASET}.{MODEL_ID}`"
+
+    logger.info("Ensuring remote embedding model exists: %s", full_model_path)
+
+    ddl = f"""
+    CREATE MODEL IF NOT EXISTS {full_model_path}
+    REMOTE WITH CONNECTION `{CONNECTION}`
+    OPTIONS (
+        ENDPOINT = '{ENDPOINT}'
+    );
+    """
+    job = client.query(ddl)
+    job.result()  # Synchronously blocks until the model registration completes
+    logger.info("Remote embedding model ready.")
+
+
+def create_embedding(client: bigquery.Client) -> None:
+    """Stage 2: Generates post embeddings using the registered remote model."""
+    project = client.project or GCP_PROJECT
+    full_model_path = f"`{project}.{BQ_DATASET}.{MODEL_ID}`"
+
+    logger.info("Generating embeddings table: `%s`", EMBEDDING_TABLE_ID)
+
+    ddl = f"""
+    CREATE OR REPLACE TABLE `{EMBEDDING_TABLE_ID}` AS
+    SELECT * FROM ML.GENERATE_EMBEDDING(
+        MODEL {full_model_path},
+        (
+            SELECT 
+                *, 
+                CONCAT(COALESCE(author_name, ''), ': ', COALESCE(post_text, '')) AS content
+            FROM `{SOURCE_TABLE_ID}`
+        ),
+        STRUCT(
+            'RETRIEVAL_DOCUMENT' AS task_type,
+            TRUE AS flatten_json_output
+        )
+    );
+    """
+    job = client.query(ddl)
+    job.result()  # Blocks until the table materialization finishes
+    logger.info("Embeddings table successfully created.")
+
+
+def run_pipeline() -> None:
+    """Pipeline entrypoint enforcing single client reuse and step ordering."""
+    client = _client()
+
+    # Step 1: Model must be committed to the metadata catalog first
+    _ensure_embedding_model(client)
+
+    # Step 2: Source data is embedded using the now-guaranteed model
+    create_embedding(client)
+
+
+if __name__ == "__main__":
+    run_pipeline()
