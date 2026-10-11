@@ -289,6 +289,8 @@ def run_sync() -> None:
         if in_cloud_run:
             from db_sync import upload_db
             upload_db(DB_PATH)
+            from bq_sink import push
+            push(DB_PATH)
 
     print(f"\n[sync] Done — seen={counts['seen']} new={counts['new']} "
           f"updated={counts['updated']} skipped={counts['skipped']}")
