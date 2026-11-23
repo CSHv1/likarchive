@@ -1,14 +1,22 @@
 import os
+import anthropic
 from flask import Flask, render_template, jsonify, request
 from dotenv import load_dotenv
 from db import get_connection, init_db
 from clerk_auth import require_auth
+from ai_rag import api_ask
 
 load_dotenv()
 
 app = Flask(__name__)
 DB_PATH = os.getenv("DB_PATH", "linkedin_likes.db")
 CLERK_PUBLISHABLE_KEY = os.getenv("CLERK_PUBLISHABLE_KEY")
+
+# RAG "Ask Your Archive" feature — None (not a half-constructed client) when
+# no key is configured, so /api/ask can fail fast with a clear 503 instead
+# of a confusing error from inside the Anthropic SDK on first use.
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+_anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
 
 if os.getenv("K_SERVICE"):
     from db_sync import download_db
@@ -168,6 +176,26 @@ def get_sync_status():
         "status":      row["status"],
         "error":       row["error"],
     })
+
+
+@app.route("/api/ask", methods=["POST"])
+@require_auth
+def ask():
+    if not _anthropic_client:
+        return jsonify({"error": "ANTHROPIC_API_KEY not configured"}), 503
+
+    data = request.get_json(silent=True) or {}
+    question = (data.get("question") or "").strip()
+    if not question:
+        return jsonify({"error": "question is required"}), 400
+
+    try:
+        results = api_ask.ui_answer_response(_anthropic_client, question)
+    except Exception as e:
+        app.logger.exception("Ask failed")
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({"results": results})
 
 
 if __name__ == "__main__":

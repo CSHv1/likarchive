@@ -16,12 +16,15 @@ A Python/Playwright scraper that logs into LinkedIn, navigates to the saved-post
 - Monitoring: alert policy on `likarchive-scraper` execution failures → email to `conradsamuelhall@gmail.com`
 - CI/CD: `.github/workflows/deploy.yml` — WIF-authenticated (no stored keys), builds + pushes `Dockerfile.ui`'s image, deploys `likarchive-ui` only on push to `main`. Zero manual deploy steps for the GUI now; the scraper Job (still on the heavy `Dockerfile`/`likarchive` image) is fully untouched by CI — build/push/update it by hand, exactly the pre-CI/CD flow.
 - **485 real posts archived and fully tagged**, confirmed served correctly by the GUI (now behind sign-in). Daily incremental runs now complete in ~1m15s (was previously hitting the 1h/2h task-timeout every time — see Known open items history below).
+- **"Ask Archive" RAG panel (Phase 10, new 2026-11-23)**: a second sidebar view in the GUI, backed by `/api/ask` -> `ai_rag/api_ask.py` -> BigQuery `VECTOR_SEARCH` over `likarchive.liked_posts_embedding` (built by `ai_rag/bq_embedding.py`, fed by `bq_sink.py`/Phase 8) -> `claude-opus-5` synthesis with web-search fallback. Verified end-to-end against the live project before this reached the GUI.
 
 **Branch:** `post_mvp` merged into `main` 2026-08-12 (fast-forward); CI/CD + Clerk work merged into `main` 2026-10-07 (`post_mvp_cicd`, fast-forward). `main` is current and deployed. Public repo — `github.com/CSHv1/likarchive`.
 
 ## Known open items (not blocking, tracked as tasks)
 
-None open right now — the last two (Dockerfile COPY-list drift, GUI sharing the scraper's heavy image) were both resolved 2026-10-10. See resolved history below.
+None open right now — Phase 10 (RAG layer) shipped 2026-11-23 and was verified end-to-end before anything was pushed. See resolved history below.
+
+### Resolved (2026-10-10) — was open, keeping the history for context
 
 ### Resolved (2026-10-10) — was open, keeping the history for context
 
@@ -86,6 +89,7 @@ HEADLESS=false MAX_POSTS=5 python scraper.py
 - **`post_mvp`** — plateau/tagging fix + absolute dates + calendar date-range picker ✅ (merged to `main` 2026-08-12)
 - **Phase 8** — BigQuery sink (`bq_sink.py` → `likarchive.liked_posts`) + LookML model ⬜ (optional, not started)
 - **Phase 9** — CI/CD (GitHub Actions + WIF) + Clerk auth for the GUI ✅ (merged to `main` 2026-10-07)
+- **Phase 10** — RAG layer: "Ask Archive" ✅ (`ai_rag/` package + `/api/ask` + GUI panel, 2026-11-23)
 
 ## Session log
 
@@ -105,4 +109,7 @@ HEADLESS=false MAX_POSTS=5 python scraper.py
 - [x] End-to-end verified in production: unauthenticated `likarchive-ui` requests get the Clerk sign-in screen and a 401 on `/api/*`; real Clerk SSO sign-in confirmed working against the live 485-post archive (2026-10-07)
 - [x] Fixed the Dockerfile COPY-drift pattern for good: switched to `COPY . .` + hardened `.dockerignore` (added `.claude/`, `.github/`, `.DS_Store`, `.env.example`, Dockerfile/`.dockerignore` themselves); verified locally by inspecting the built image's `/app` contents and booting both entrypoints before pushing (2026-10-07)
 - [x] Split the GUI onto its own lightweight image: new `Dockerfile.ui` + `requirements-ui.txt`, `deploy.yml` updated to build/push/deploy only this image for `likarchive-ui` and no longer touch the scraper's heavy image at all. 224MB vs. 2.13GB. Verified locally (image contents, both entrypoints) and in production (new revision confirmed, zero errors, scraper Job confirmed untouched) (2026-10-10)
-- [ ] Next concrete task: your call — start Phase 8 (optional), or move on to the planned RAG layer (Vertex AI embeddings + BigQuery vector search, hand-built per the original project plan)
+- [x] Phase 8 done, repurposed: `bq_sink.py` built and wired into `run_sync()`, mirroring `liked_posts` into BigQuery — feeds the RAG layer below instead of the originally-planned Looker model (dropped) (2026-10-11)
+- [x] Track 2a: `ai_rag/bq_embedding.py` built and run against the live project — remote Vertex embedding model + `likarchive.liked_posts_embedding` table created (2026-10-14, confirmed still intact 2026-11-23)
+- [x] Finished wiring the RAG layer end-to-end and shipped it as "Ask Archive" in the GUI: fixed a signature mismatch between `api_ask.py` and `bq_retrieval_query.py` (the latter now owns client construction), turned `ai_rag/` into a proper package (`__init__.py`, absolute imports), fixed the web-search error-branch to match the SDK's actual error shape, added the `/api/ask` route to `app.py`, replaced a broken server-rendered-form paste in `templates/index.html` with a proper `authFetch()`-based sidebar panel matching the existing SPA pattern, and added `ai_rag/` to `Dockerfile.ui`'s explicit `COPY` allowlist (would otherwise have been the same `ModuleNotFoundError` bug class as Phase 6/9 on the next GUI deploy). Verified via a real round-trip against live GCP (ADC) + the Anthropic API before touching the GUI — retrieval returned real matching posts, synthesis returned a grounded answer with web-search sources. Also rebuilt and boot-tested `Dockerfile.ui` locally (Docker Desktop started mid-session): `ai_rag/` confirmed present in the image, `gunicorn app:app` boots clean, `/` returns 200, `/api/ask` 401s unauthenticated — committed and pushed to `main` (2026-11-23)
+- [ ] Next concrete task: your call — a new feature, or verify the GitHub Actions deploy that this push triggers completes clean in production

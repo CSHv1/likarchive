@@ -20,6 +20,11 @@ tagger.py            — Claude API auto-tagger (claude-haiku-4-5-20251001); tag
 app.py               — Flask web UI — search, filter, browse saved posts (Phase 3)
 clerk_auth.py        — Clerk require_auth Flask decorator, gates all /api/* routes (Phase 9)
 templates/index.html — Single-page vanilla JS frontend served by app.py
+bq_sink.py            — BigQuery mirror of liked_posts (push()), called from scraper.py's run_sync() after db_sync.upload_db() — feeds the RAG layer below (Phase 8, repurposed)
+ai_rag/               — Hand-written RAG layer behind the GUI's "Ask Archive" panel (Phase 10)
+  bq_embedding.py       — Builds the remote embedding model + liked_posts_embedding table; run manually (`python -m ai_rag.bq_embedding`), not wired into run_sync()
+  bq_retrieval_query.py — vector_search_call(question, top_k) — VECTOR_SEARCH with an inline ML.GENERATE_EMBEDDING subquery, so callers only ever pass plain text
+  api_ask.py            — ui_answer_response(client, question) — retrieves via the above, then asks Claude Opus 5 to synthesize an answer with web-search fallback; called from app.py's /api/ask
 requirements.txt     — Full deps, used by the scraper's Dockerfile (heavy, Chromium-inclusive)
 requirements-ui.txt  — GUI-only deps subset, used by Dockerfile.ui (lightweight, Phase 9 follow-up)
 Dockerfile           — Scraper image (Playwright/Chromium) — also what likarchive-scraper runs
@@ -58,6 +63,11 @@ python scheduler.py           # daily auto-sync (runs immediately, then 08:00 da
 | `GCP_PROJECT`       | —                   | GCP project ID — required by `cloud_auth.py` when `K_SERVICE` is set (Phase 5)       |
 | `GCS_BUCKET`        | `likarchive-db`     | GCS bucket for SQLite persistence (Phase 5)                                          |
 | `AUTH_STATE_SECRET` | `linkedin-auth-state` | Secret Manager secret name holding `auth_state.json` (Phase 5)                     |
+| `GCP_PROJECT`       | —                   | Also read by `bq_sink.py` and `ai_rag/bq_embedding.py`/`bq_retrieval_query.py` (Phase 8/10) — same var as above, just a second set of call sites |
+| `BQ_DATASET`        | `likarchive`        | BigQuery dataset for `bq_sink.py`'s mirror table and the RAG embedding table (Phase 8/10) |
+| `CONNECTION`        | `csh-data-engineering-on-gcp.europe-west2.likarchive_vertex_conn` | BigQuery remote-model connection, used by `ai_rag/bq_embedding.py` to create the embedding model (Phase 10) |
+| `ENDPOINT`          | `text-embedding-005` | Vertex embedding model endpoint (Phase 10)                                           |
+| `EMBEDDING_MODEL`   | `linkedinposts_text_embedding` | Name of the remote BigQuery ML model `ai_rag/bq_embedding.py` creates/uses (Phase 10) |
 
 ## Database schema
 
@@ -251,14 +261,11 @@ Live resources (region `europe-west2`, project `csh-data-engineering-on-gcp`):
   - Created via `gcloud beta monitoring policies create --policy-from-file=...` (a JSON policy definition — no simple flag-only form for a filter this specific)
 - [ ] Verify via Cloud Run logs that a *real scheduled* (not manually forced) run completes and uploads — will naturally confirm at the next 07:00 UTC firing; the alert policy will also get a real-world test the next time a run fails (the ongoing backfill-plateau runs are a likely candidate)
 
-### Phase 8 — BigQuery sink (optional, for Looker)
+### Phase 8 — BigQuery sink (complete; repurposed from "optional, for Looker" to feeding the RAG layer)
 
-- [ ] Add `bq_sink.py` — reads from SQLite, pushes new/updated rows to BigQuery
-  - Table: `likarchive.liked_posts` — mirror of SQLite schema
-  - Use `scraped_at` / `last_updated` to identify rows to push since last BQ write
-  - Use `google-cloud-bigquery` client with `load_table_from_dataframe` or streaming inserts
-- [ ] Call `bq_sink.push()` at the end of `run_sync()` after DB upload
-- [ ] Create LookML model on top of `likarchive.liked_posts` for exploration in Looker
+- [x] `bq_sink.py` — reads from SQLite, pushes new/updated rows to BigQuery (`likarchive.liked_posts`, watermarked on `last_updated`, `MERGE`'d via a staging table — upsert-safe, so a vector index built on top never sees a duplicated row)
+- [x] `bq_sink.push()` called from `run_sync()` after `db_sync.upload_db()` (gated on `K_SERVICE`/`CLOUD_RUN_JOB` same as the rest of the Cloud Run-only calls)
+- [ ] LookML model on top of `likarchive.liked_posts` — dropped; the Looker angle was superseded by the RAG use case (Phase 10) once that became the actual reason to have the data in BigQuery
 
 ### Phase 9 — CI/CD (GitHub Actions) + Clerk auth for the GUI (complete)
 
@@ -283,5 +290,19 @@ Two real gaps closed: every deploy had been 100% manual (`docker build`/`push`/`
 3. **Scraper Job silently exposed to new images via the shared `:latest` tag.** The "scraper stays manual" design only holds if the Job's image reference is actually frozen — but `gcloud run jobs describe` showed it stored the tag `likarchive:latest`, not a digest. Since the CI/CD pipeline pushes a new `:latest` on every GUI deploy, the scraper's *next execution* would have silently picked up the Clerk-era image too, defeating the intended isolation even though no one ran `gcloud run jobs update`. Fixed by pinning the Job explicitly to its last known-good pre-Clerk digest (found via `gcloud artifacts docker images list --include-tags`, matching the 2026-08-12 `post_mvp` push): `gcloud run jobs update likarchive-scraper --image=...@sha256:3420426a...`. Going forward, the scraper Job only changes via an explicit digest/tag update, never implicitly.
 
 Verified end-to-end in production: unauthenticated requests to `likarchive-ui` get a Clerk sign-in screen (and a 401 on `/api/*`), real sign-in via Clerk SSO works and shows the actual 485-post archive, and `likarchive-scraper`'s image is confirmed pinned and untouched by the GUI-only deploy.
+
+### Phase 10 — RAG layer: "Ask Archive" (complete)
+
+Hand-written retrieval-augmented Q&A over the archive, surfaced in the GUI as a second sidebar view ("Ask Archive") alongside the existing post browser. Three new modules under `ai_rag/` (see File structure above), fed by `bq_sink.py` (Phase 8, repurposed — see that section).
+
+- [x] `ai_rag/bq_embedding.py` — `CREATE MODEL`s a remote Vertex embedding model (`text-embedding-005`) over the `likarchive_vertex_conn` connection, then materializes `likarchive.liked_posts_embedding` via `ML.GENERATE_EMBEDDING` on `likarchive.liked_posts`. Run manually (`python -m ai_rag.bq_embedding`) — not wired into `run_sync()`, since re-embedding the whole archive on every scrape would be wasteful for a table that only needs rebuilding occasionally.
+- [x] `ai_rag/bq_retrieval_query.py` — `vector_search_call(question, top_k=5)` runs `VECTOR_SEARCH` against that table with an inline `ML.GENERATE_EMBEDDING` subquery, so callers pass plain question text with no separate embed step.
+- [x] `ai_rag/api_ask.py` — `ui_answer_response(client, question)` retrieves via the above, then asks `claude-opus-5` to synthesize an answer (system prompt: ground in the retrieved posts first, fall back to the `web_search_20260209` server tool only when the archive doesn't have it, always cite sources). Takes the Anthropic client as a parameter rather than constructing its own — same pattern as `tagger.py`'s `tag_posts()`.
+- [x] `app.py` — new `/api/ask` route (POST, `@require_auth` like every other `/api/*` route), constructs one `anthropic.Anthropic()` client at module load (or `None` if `ANTHROPIC_API_KEY` is unset, so the route fails fast with a 503 instead of a confusing SDK-internal error on first use).
+- [x] `templates/index.html` — new "Ask Archive" sidebar item swaps the post-browser view for a question box + answer panel, calling `/api/ask` through the existing `authFetch()` helper (same auth path as every other API call, no separate auth plumbing needed).
+- [x] `ai_rag/__init__.py` added — `ai_rag` is a proper package now (`from ai_rag import api_ask` etc.), not a flat script directory; `bq_embedding.py` is still runnable standalone via `python -m ai_rag.bq_embedding` from the repo root.
+- [x] **`Dockerfile.ui`'s explicit `COPY` allowlist updated to add `ai_rag/`.** Caught before this ever reached a real deploy: that Dockerfile deliberately doesn't do `COPY . .` (see the Phase 9 follow-up below — the opposite risk direction from the main Dockerfile), so a new top-level package needs an explicit, considered line, same bug class as the Phase 6/Phase 9 `COPY`-drift bugs if missed.
+
+Verified end-to-end against live GCP (ADC) and the real Anthropic API before this was ever wired into the GUI: `vector_search_call()` returns real matching posts from the already-existing `liked_posts_embedding` table (built in an earlier session — Track 2a), and `ui_answer_response()` returns a grounded answer plus web-search sources for a question the archive only partially covered. `Dockerfile.ui` rebuilt and boot-tested locally too — image contents confirmed `ai_rag/` present, `gunicorn app:app` boots clean (no `ModuleNotFoundError`), `/` returns 200, `/api/ask` correctly 401s unauthenticated — same checks as every past `Dockerfile.ui` change.
 
 **Follow-up (2026-10-10): GUI split onto its own lightweight image.** `likarchive-ui` never touches a browser but had been sharing the scraper's Playwright/Chromium-inclusive image (2.13GB) since Phase 4 — a deferred optimization finally picked up here. New `Dockerfile.ui` (`python:3.11-slim` base) + `requirements-ui.txt` (just `flask`/`gunicorn`/`python-dotenv`/`google-cloud-storage`/`clerk-backend-api`/`httpx` — `db.py` itself is pure stdlib) builds a 224MB image, roughly a 90% reduction. Deliberately an **explicit `COPY` allowlist** (`app.py db.py db_sync.py clerk_auth.py` + `templates/`) rather than the main Dockerfile's `COPY . .` — opposite risk direction: the main Dockerfile's fix was about under-inclusion (a new first-party module silently missing), while this image's risk is over-inclusion, so a new module earning a place in the lean image should be a deliberate choice, not something swept in by default. `deploy.yml` now builds/pushes/deploys only `likarchive-ui:<sha>` from `Dockerfile.ui`, fully decoupled from the scraper's image — CI no longer touches the heavy image at all, not even to build it; it's built/pushed/updated by hand exactly like before CI/CD existed, consistent with the scraper's manual-update design. Verified locally before ever pushing (image contents inspected, both `/` and `/api/*` behavior confirmed identical to the old shared image) and end-to-end in production after deploy (new revision confirmed running `likarchive-ui@sha256:...`, zero errors, scraper Job confirmed still untouched).

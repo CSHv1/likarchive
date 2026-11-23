@@ -1,4 +1,15 @@
-"""Adding of bq embedding as a table derived from liked posts."""
+"""Track 2a: hand-written BigQuery embedding pipeline.
+
+Builds (and rebuilds) a remote-model embedding table over liked_posts so
+bq_retrieval_query.py's VECTOR_SEARCH has something to search. Run manually,
+from the repo root, whenever liked_posts changes meaningfully:
+
+    python -m ai_rag.bq_embedding
+
+(Not wired into run_sync() — re-embedding the whole archive on every scrape
+would be wasteful; this is a deliberate, occasional step, same spirit as the
+manual re-auth/redeploy steps elsewhere in this project.)
+"""
 
 import logging
 import os
@@ -18,7 +29,7 @@ CONNECTION = os.getenv(
 )
 SOURCE_TABLE_ID = f"{GCP_PROJECT}.{BQ_DATASET}.liked_posts"
 EMBEDDING_TABLE_ID = f"{GCP_PROJECT}.{BQ_DATASET}.liked_posts_embedding"
-\
+
 
 def _client() -> bigquery.Client:
     """Initializes and returns a single BigQuery client."""
@@ -56,8 +67,8 @@ def create_embedding(client: bigquery.Client) -> None:
     SELECT * FROM ML.GENERATE_EMBEDDING(
         MODEL {full_model_path},
         (
-            SELECT 
-                *, 
+            SELECT
+                *,
                 CONCAT(COALESCE(author_name, ''), ': ', COALESCE(post_text, '')) AS content
             FROM `{SOURCE_TABLE_ID}`
         ),

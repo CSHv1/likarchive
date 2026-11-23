@@ -367,6 +367,118 @@
     }
     .date-clear-link:hover { color: var(--blue-dark); text-decoration: underline; }
 
+    /* Ask Archive panel */
+    #ask-panel {
+      flex: 1;
+      overflow-y: auto;
+      padding: 32px 24px 24px;
+      display: none;
+    }
+    #ask-panel.visible { display: block; }
+
+    .ask-intro {
+      max-width: 640px;
+      margin: 0 auto 18px;
+      text-align: center;
+    }
+    .ask-intro strong {
+      display: block;
+      font-size: 17px;
+      font-weight: 700;
+      color: var(--text-1);
+      margin-bottom: 4px;
+    }
+    .ask-intro span { font-size: 12.5px; color: var(--text-muted); }
+
+    .ask-box {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      max-width: 640px;
+      margin: 0 auto 20px;
+    }
+
+    #ask-input {
+      width: 100%;
+      min-height: 72px;
+      padding: 11px 14px;
+      border: 1.5px solid var(--border);
+      border-radius: 10px;
+      font-size: 13.5px;
+      font-family: inherit;
+      color: var(--text-1);
+      background: var(--surface);
+      outline: none;
+      resize: vertical;
+      transition: border-color 0.15s;
+    }
+    #ask-input::placeholder { color: var(--text-muted); }
+    #ask-input:focus { border-color: var(--blue); }
+
+    #ask-submit {
+      align-self: flex-end;
+      padding: 8px 20px;
+      background: var(--blue);
+      border: none;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      color: #fff;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    #ask-submit:hover:not(:disabled) { background: var(--blue-dark); }
+    #ask-submit:disabled { opacity: 0.6; cursor: default; }
+
+    .ask-answer {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-card);
+      padding: 16px 18px;
+      margin: 0 auto 14px;
+      max-width: 640px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      line-height: 1.6;
+      font-size: 13.5px;
+      color: var(--text-1);
+    }
+
+    .ask-sources {
+      max-width: 640px;
+      margin: 0 auto 14px;
+      padding: 14px 18px;
+      background: var(--surface-2);
+      border-radius: var(--radius-card);
+    }
+    .ask-sources-title {
+      font-size: 10.5px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.7px;
+      color: var(--text-muted);
+      margin-bottom: 7px;
+    }
+    .ask-source-link {
+      display: block;
+      font-size: 12.5px;
+      color: var(--blue);
+      text-decoration: none;
+      margin-bottom: 5px;
+    }
+    .ask-source-link:hover { color: var(--blue-dark); text-decoration: underline; }
+
+    .ask-error {
+      max-width: 640px;
+      margin: 0 auto 14px;
+      color: #8A1F1F;
+      background: #FDECEC;
+      border: 1px solid #F5C6C6;
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 12.5px;
+    }
+
     /* States */
     .empty {
       text-align: center;
@@ -448,6 +560,8 @@
       <span class="sb-count" id="nav-total">—</span>
     </div>
 
+    <div class="sb-nav-item" id="nav-ask">Ask Archive</div>
+
     <div class="sb-section">
       <div class="sb-section-head" data-target="tags-list">
         <span class="sb-section-label">Tags</span>
@@ -503,6 +617,18 @@
   <div id="chips"></div>
 
   <div id="content"><div class="spinner">Loading…</div></div>
+
+  <div id="ask-panel">
+    <div class="ask-intro">
+      <strong>Ask Your Archive</strong>
+      <span>Ask a question grounded in your saved posts — falls back to web search if the archive doesn't have the answer.</span>
+    </div>
+    <div class="ask-box">
+      <textarea id="ask-input" placeholder="e.g. What have people been saying about agentic AI workflows?"></textarea>
+      <button id="ask-submit">Ask</button>
+    </div>
+    <div id="ask-result"></div>
+  </div>
 </main>
 
 </div><!-- /#app-shell -->
@@ -624,7 +750,20 @@ function initApp() {
   });
 
   // "All Saved" nav item
-  document.getElementById('nav-all').addEventListener('click', clearAll);
+  document.getElementById('nav-all').addEventListener('click', () => {
+    showPostsPanel();
+    clearAll();
+  });
+
+  // "Ask Archive" nav item
+  document.getElementById('nav-ask').addEventListener('click', showAskPanel);
+  document.getElementById('ask-submit').addEventListener('click', submitAsk);
+  document.getElementById('ask-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      submitAsk();
+    }
+  });
 
   // Event delegation — cards
   document.getElementById('content').addEventListener('click', e => {
@@ -869,6 +1008,77 @@ function onDateChange() {
   document.getElementById('date-clear-row').style.display =
     (S.fromDate || S.toDate) ? '' : 'none';
   reset();
+}
+
+// ── Ask Archive ──────────────────────────────────────────────────────────
+function showPostsPanel() {
+  document.getElementById('nav-all').classList.add('active');
+  document.getElementById('nav-ask').classList.remove('active');
+  document.getElementById('topbar').style.display = '';
+  document.getElementById('chips').style.display = '';
+  document.getElementById('content').style.display = '';
+  document.getElementById('ask-panel').classList.remove('visible');
+}
+
+function showAskPanel() {
+  document.getElementById('nav-ask').classList.add('active');
+  document.getElementById('nav-all').classList.remove('active');
+  document.getElementById('topbar').style.display = 'none';
+  document.getElementById('chips').style.display = 'none';
+  document.getElementById('content').style.display = 'none';
+  document.getElementById('ask-panel').classList.add('visible');
+  document.getElementById('ask-input').focus();
+}
+
+async function submitAsk() {
+  const input = document.getElementById('ask-input');
+  const question = input.value.trim();
+  if (!question) return;
+
+  const resultEl = document.getElementById('ask-result');
+  const btn = document.getElementById('ask-submit');
+  btn.disabled = true;
+  btn.textContent = 'Thinking…';
+  resultEl.innerHTML = '<div class="spinner">Searching your archive…</div>';
+
+  try {
+    const res = await authFetch('/api/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      resultEl.innerHTML = `<div class="ask-error">${esc(data.error || 'Something went wrong.')}</div>`;
+      return;
+    }
+    renderAskResults(data.results || []);
+  } catch (err) {
+    resultEl.innerHTML = `<div class="ask-error">Network error: ${esc(err.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Ask';
+  }
+}
+
+function renderAskResults(blocks) {
+  const resultEl = document.getElementById('ask-result');
+  let html = '';
+  for (const block of blocks) {
+    if (block.type === 'text') {
+      html += `<div class="ask-answer">${esc(block.text)}</div>`;
+    } else if (block.type === 'sources' && block.sources && block.sources.length) {
+      html += `<div class="ask-sources">
+        <div class="ask-sources-title">Web sources</div>
+        ${block.sources.map(s =>
+          `<a class="ask-source-link" href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.title || s.url)}</a>`
+        ).join('')}
+      </div>`;
+    } else if (block.type === 'error') {
+      html += `<div class="ask-error">${esc(String(block.error))}</div>`;
+    }
+  }
+  resultEl.innerHTML = html || '<div class="empty"><strong>No answer returned</strong></div>';
 }
 
 // ── Utils ─────────────────────────────────────────────────────────────────
