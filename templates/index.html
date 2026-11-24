@@ -189,6 +189,40 @@
       text-align: right;
     }
 
+    /* Hamburger (mobile only — shown by the media query below) */
+    #sidebar-toggle {
+      display: none;
+      flex-shrink: 0;
+      width: 34px;
+      height: 34px;
+      border: 1.5px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--text-2);
+      font-size: 16px;
+      cursor: pointer;
+    }
+
+    /* Shown instead of #search while the Ask Archive panel is active —
+       keeps the hamburger reachable without hiding the whole topbar */
+    #topbar-title {
+      display: none;
+      flex: 1;
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-1);
+    }
+
+    /* Mobile sidebar backdrop — inert on desktop */
+    #sidebar-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(10, 20, 30, 0.4);
+      z-index: 40;
+    }
+    #sidebar-backdrop.visible { display: block; }
+
     /* Filter chips */
     #chips {
       display: flex;
@@ -571,6 +605,46 @@
     #app-shell.hidden { display: none; }
 
     #user-button { flex-shrink: 0; }
+
+    /* ── Mobile layout ────────────────────────────────────────────────────
+       The sidebar becomes a slide-out drawer (fixed, off-canvas by default)
+       instead of taking permanent width from the flex row; #main takes the
+       full viewport. Below this breakpoint is phones and most portrait
+       tablets — desktop/laptop widths are untouched. */
+    @media (max-width: 760px) {
+      body { height: 100dvh; }
+
+      #sidebar {
+        position: fixed;
+        top: 0; left: 0;
+        height: 100dvh;
+        width: 82vw;
+        max-width: 300px;
+        z-index: 50;
+        transform: translateX(-100%);
+        transition: transform 0.2s ease;
+        box-shadow: 2px 0 16px rgba(10, 20, 30, 0.18);
+      }
+      #sidebar.open { transform: translateX(0); }
+
+      #sidebar-toggle { display: inline-flex; align-items: center; justify-content: center; }
+
+      #topbar { padding: 10px 14px; gap: 8px; }
+      /* 16px floor on tap-focused inputs — iOS Safari auto-zooms the page
+         on any input below that, which is disorienting on a search field */
+      #search { font-size: 16px; padding: 8px 12px; }
+      #result-count { min-width: 0; }
+
+      #content { padding: 12px 14px 20px; }
+      .card { padding: 13px 14px 12px; }
+
+      #chips { padding: 8px 14px; }
+
+      #ask-panel { padding: 22px 16px 20px; }
+      .ask-intro strong { font-size: 15.5px; }
+      #ask-input { font-size: 16px; min-height: 100px; }
+      #ask-submit { width: 100%; align-self: stretch; padding: 11px 20px; }
+    }
   </style>
 </head>
 <body>
@@ -579,6 +653,9 @@
 <div id="auth-gate"><div id="sign-in"></div></div>
 
 <div id="app-shell" class="hidden">
+
+<!-- Mobile-only: tap to dismiss the sidebar drawer -->
+<div id="sidebar-backdrop"></div>
 
 <!-- ── Sidebar ─────────────────────────────────────────────────────────── -->
 <aside id="sidebar">
@@ -643,8 +720,10 @@
 <main id="main">
   <div id="sync-banner"></div>
   <div id="topbar">
+    <button id="sidebar-toggle" aria-label="Open menu">☰</button>
     <input id="search" type="search" autocomplete="off"
            placeholder="Search posts, authors, keywords and tags…">
+    <span id="topbar-title">Ask Archive</span>
     <div id="result-count"></div>
   </div>
 
@@ -799,6 +878,10 @@ function initApp() {
     }
   });
 
+  // Mobile sidebar drawer
+  document.getElementById('sidebar-toggle').addEventListener('click', openSidebar);
+  document.getElementById('sidebar-backdrop').addEventListener('click', closeSidebar);
+
   // Event delegation — cards
   document.getElementById('content').addEventListener('click', e => {
     const toggle = e.target.closest('.card-toggle, .card-body');
@@ -893,7 +976,7 @@ async function fetchPosts(append = false) {
   }
 }
 
-function reset() { S.page = 1; fetchPosts(false); renderChips(); }
+function reset() { S.page = 1; fetchPosts(false); renderChips(); closeSidebar(); }
 
 function loadMore() {
   if (S.page >= S.pages) return;
@@ -1045,22 +1128,41 @@ function onDateChange() {
 }
 
 // ── Ask Archive ──────────────────────────────────────────────────────────
+// ── Mobile sidebar drawer ───────────────────────────────────────────────
+function openSidebar() {
+  document.getElementById('sidebar').classList.add('open');
+  document.getElementById('sidebar-backdrop').classList.add('visible');
+}
+
+function closeSidebar() {
+  document.getElementById('sidebar').classList.remove('open');
+  document.getElementById('sidebar-backdrop').classList.remove('visible');
+}
+
 function showPostsPanel() {
   document.getElementById('nav-all').classList.add('active');
   document.getElementById('nav-ask').classList.remove('active');
-  document.getElementById('topbar').style.display = '';
+  // Toggle what's inside the topbar, not the topbar itself — the hamburger
+  // (mobile) needs to stay reachable no matter which panel is active.
+  document.getElementById('search').style.display = '';
+  document.getElementById('result-count').style.display = '';
+  document.getElementById('topbar-title').style.display = 'none';
   document.getElementById('chips').style.display = '';
   document.getElementById('content').style.display = '';
   document.getElementById('ask-panel').classList.remove('visible');
+  closeSidebar();
 }
 
 function showAskPanel() {
   document.getElementById('nav-ask').classList.add('active');
   document.getElementById('nav-all').classList.remove('active');
-  document.getElementById('topbar').style.display = 'none';
+  document.getElementById('search').style.display = 'none';
+  document.getElementById('result-count').style.display = 'none';
+  document.getElementById('topbar-title').style.display = 'block';
   document.getElementById('chips').style.display = 'none';
   document.getElementById('content').style.display = 'none';
   document.getElementById('ask-panel').classList.add('visible');
+  closeSidebar();
   document.getElementById('ask-input').focus();
 }
 

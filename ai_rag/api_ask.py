@@ -45,22 +45,35 @@ def ui_answer_response(client: anthropic.Anthropic, ui_user_query: str) -> list:
     if response.stop_reason == "refusal":
         return [{"type": "error", "error": "The model declined to answer this question."}]
 
-    results = []
+    # A turn that uses web search comes back as several interleaved blocks —
+    # text, then a search call, then more text continuing the same answer.
+    # Collect everything first and merge into one answer + one source list,
+    # rather than rendering each block as its own separate bubble in the UI.
+    text_parts = []
+    sources = []
+    seen_urls = set()
+    errors = []
+
     for block in response.content:
         if block.type == "text":
-            results.append({"type": "text", "text": block.text})
+            text_parts.append(block.text)
         elif block.type == "web_search_tool_result":
             if isinstance(block.content, list):
-                results.append({
-                    "type": "sources",
-                    "sources": [{"url": r.url, "title": r.title} for r in block.content]
-                })
+                for r in block.content:
+                    if r.url not in seen_urls:
+                        seen_urls.add(r.url)
+                        sources.append({"url": r.url, "title": r.title})
             else:
                 # Error case: content is a single object (e.g. {error_code: "..."}),
                 # not the list of results a success returns.
-                results.append({
-                    "type": "error",
-                    "error": getattr(block.content, "error_code", str(block.content)),
-                })
+                errors.append(getattr(block.content, "error_code", str(block.content)))
+
+    results = []
+    if text_parts:
+        results.append({"type": "text", "text": "\n\n".join(text_parts)})
+    if sources:
+        results.append({"type": "sources", "sources": sources})
+    for e in errors:
+        results.append({"type": "error", "error": e})
 
     return results
