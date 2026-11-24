@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Likarchive</title>
   <script>window.__CLERK_PUBLISHABLE_KEY = "{{ clerk_publishable_key }}";</script>
+  <!-- Markdown rendering for "Ask Archive" answers (Claude's responses come back as Markdown) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
   <style>
     :root {
       --bg:            #F6F8FB;
@@ -437,11 +440,42 @@
       padding: 16px 18px;
       margin: 0 auto 14px;
       max-width: 640px;
-      white-space: pre-wrap;
       word-break: break-word;
       line-height: 1.6;
       font-size: 13.5px;
       color: var(--text-1);
+    }
+    /* Rendered Markdown inside the answer (marked.js + DOMPurify output) */
+    .ask-answer :first-child { margin-top: 0; }
+    .ask-answer :last-child { margin-bottom: 0; }
+    .ask-answer h1, .ask-answer h2, .ask-answer h3 {
+      margin: 16px 0 8px;
+      font-size: 14.5px;
+      font-weight: 700;
+      color: var(--text-1);
+    }
+    .ask-answer p { margin: 0 0 10px; }
+    .ask-answer ul, .ask-answer ol { margin: 0 0 10px; padding-left: 20px; }
+    .ask-answer li { margin-bottom: 4px; }
+    .ask-answer strong { font-weight: 700; color: var(--text-1); }
+    .ask-answer a { color: var(--blue); text-decoration: none; }
+    .ask-answer a:hover { color: var(--blue-dark); text-decoration: underline; }
+    .ask-answer code {
+      background: var(--surface-2);
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-size: 12.5px;
+    }
+    .ask-answer hr {
+      border: none;
+      border-top: 1px solid var(--divider);
+      margin: 16px 0;
+    }
+    .ask-answer blockquote {
+      margin: 0 0 10px;
+      padding-left: 12px;
+      border-left: 2px solid var(--border);
+      color: var(--text-2);
     }
 
     .ask-sources {
@@ -1061,12 +1095,22 @@ async function submitAsk() {
   }
 }
 
+function renderMarkdown(text) {
+  // Claude's answers come back as Markdown — render it properly instead of
+  // dumping literal `**`/`##`/`-` characters at the user. DOMPurify sanitizes
+  // marked's HTML output before it ever touches innerHTML.
+  if (window.marked && window.DOMPurify) {
+    return DOMPurify.sanitize(marked.parse(text));
+  }
+  return `<p>${esc(text)}</p>`; // fallback if the CDN scripts failed to load
+}
+
 function renderAskResults(blocks) {
   const resultEl = document.getElementById('ask-result');
   let html = '';
   for (const block of blocks) {
     if (block.type === 'text') {
-      html += `<div class="ask-answer">${esc(block.text)}</div>`;
+      html += `<div class="ask-answer">${renderMarkdown(block.text)}</div>`;
     } else if (block.type === 'sources' && block.sources && block.sources.length) {
       html += `<div class="ask-sources">
         <div class="ask-sources-title">Web sources</div>

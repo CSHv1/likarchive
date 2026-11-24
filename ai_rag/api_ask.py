@@ -27,6 +27,10 @@ def ui_answer_response(client: anthropic.Anthropic, ui_user_query: str) -> list:
         model=MODEL,
         max_tokens=2000,
         system=SYSTEM_PROMPT,
+        # medium effort: this is a chat-style Q&A workload, not long-horizon
+        # agentic work — the default (high) was adding real latency for
+        # thinking depth this task doesn't need.
+        output_config={"effort": "medium"},
         messages=[{
             "role": "user",
             "content": f"User Query: {ui_user_query}; User Content: {retrieved_posts}"

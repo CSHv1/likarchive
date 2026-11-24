@@ -25,4 +25,9 @@ ENV DB_PATH=/data/linkedin_likes.db
 
 EXPOSE 8080
 
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "app:app"]
+# --timeout 170: gunicorn's sync-worker default (30s) is shorter than a real
+# /api/ask round trip (BigQuery retrieval + a non-streaming Claude call with
+# web search can run 45-90s) — without this the worker gets SIGKILL'd mid-
+# request well before Cloud Run's own 300s service timeout even comes into
+# play. Kept comfortably under that 300s ceiling.
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--timeout", "170", "app:app"]
