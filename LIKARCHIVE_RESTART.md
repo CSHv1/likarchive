@@ -22,9 +22,11 @@ A Python/Playwright scraper that logs into LinkedIn, navigates to the saved-post
 
 ## Known open items (not blocking, tracked as tasks)
 
-None open right now — Phase 10 (RAG layer) shipped 2026-11-23 and was verified end-to-end before anything was pushed. See resolved history below.
+None open right now — the "Ask Archive" 403 (below) was fixed the same day it was found. See resolved history below.
 
-### Resolved (2026-10-10) — was open, keeping the history for context
+### Resolved (2026-11-24) — was open, keeping the history for context
+
+**First real "Ask Archive" attempt in production hit `403 bigquery.connections.use`.** My local end-to-end verification (2026-11-23) had run under my own `gcloud` user credentials, not the actual Cloud Run runtime identity — `likarchive-sa` had never been granted use on either BigQuery connection (`likarchive_vertex_conn` or BigQuery's auto-provisioned `__default_cloudresource_connection__`, which is what the inline `ML.GENERATE_EMBEDDING` inside `VECTOR_SEARCH` actually consults at query time). Fixed by granting `likarchive-sa` `roles/bigquery.connectionUser` on both, via the Connection API's `setIamPolicy` (no first-class `gcloud`/`bq` subcommand for this, same as the Phase 7 Monitoring policy). Scoped narrowly — just lets the grantee use the connection, not the Vertex AI permissions themselves (those already live on the connections' own system-managed service accounts). Full writeup in `CLAUDE.md`'s Phase 10 section. **Not yet re-confirmed in the live GUI** — waiting on the user to retry "Ask Archive" for the real end-to-end check (couldn't simulate it myself: no `iam.serviceAccountTokenCreator` on `likarchive-sa` to impersonate it, and deliberately didn't mint a new SA key just to test, given this project's WIF-over-static-keys stance).
 
 ### Resolved (2026-10-10) — was open, keeping the history for context
 
