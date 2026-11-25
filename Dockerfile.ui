@@ -30,4 +30,8 @@ EXPOSE 8080
 # web search can run 45-90s) — without this the worker gets SIGKILL'd mid-
 # request well before Cloud Run's own 300s service timeout even comes into
 # play. Kept comfortably under that 300s ceiling.
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--timeout", "170", "app:app"]
+# --worker-class gthread --threads 8: /api/ask now streams (SSE), holding its
+# connection open for the whole answer. With gunicorn's default single sync
+# worker that would block every other request (post list, tags...) until the
+# answer finished; threads let those keep being served alongside a stream.
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--timeout", "170", "--worker-class", "gthread", "--threads", "8", "app:app"]

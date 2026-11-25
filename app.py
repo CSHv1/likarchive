@@ -1,6 +1,7 @@
+import json
 import os
 import anthropic
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, Response, render_template, jsonify, request, stream_with_context
 from dotenv import load_dotenv
 from db import get_connection, init_db
 from clerk_auth import require_auth
@@ -185,17 +186,27 @@ def ask():
         return jsonify({"error": "ANTHROPIC_API_KEY not configured"}), 503
 
     data = request.get_json(silent=True) or {}
-    question = (data.get("question") or "").strip()
+    question = (data.get("question") or "").strip()[:4000]
     if not question:
         return jsonify({"error": "question is required"}), 400
+    history = api_ask.clean_history(data.get("history"))
 
-    try:
-        results = api_ask.ui_answer_response(_anthropic_client, question)
-    except Exception as e:
-        app.logger.exception("Ask failed")
-        return jsonify({"error": str(e)}), 500
+    # Server-Sent Events: one `data: {json}` line per event, flushed as the
+    # answer is generated, so the browser can render it token-by-token.
+    def generate():
+        try:
+            for event in api_ask.stream_answer(_anthropic_client, question, history):
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception as e:
+            app.logger.exception("Ask failed")
+            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
-    return jsonify({"results": results})
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 if __name__ == "__main__":

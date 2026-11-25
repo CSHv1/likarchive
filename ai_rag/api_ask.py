@@ -1,9 +1,19 @@
-"""Track 2a: synthesis side of the hand-written RAG layer.
+"""Synthesis side of the hand-written RAG layer ("Ask Archive").
 
 Called from app.py's /api/ask route — not run standalone. The caller owns
 the anthropic.Anthropic() client (built once from ANTHROPIC_API_KEY) and
 passes it in, same pattern as tagger.py's tag_posts().
+
+stream_answer() is a generator of small dict events that app.py forwards to
+the browser as Server-Sent Events, so the answer appears token-by-token
+instead of after one long blocking wait. It's multi-turn: the browser keeps
+the conversation history and sends it back with each question (the server
+stays stateless, which matters on Cloud Run where consecutive requests can
+land on different instances).
 """
+
+import re
+from typing import Any, Dict, Iterator, List
 
 import anthropic
 
@@ -11,69 +21,167 @@ from ai_rag import bq_retrieval_query
 
 MODEL = "claude-opus-5"
 
-SYSTEM_PROMPT = """You are an AI assistant designed to answer user questions accurately based on retrieved posts and web search.
+SYSTEM_PROMPT = """You are an AI assistant in an ongoing conversation with the user about their personal archive of saved LinkedIn posts.
 
 Follow these operational guidelines:
-1. Primary Source: Base your response primarily on the provided retrieved posts.
+1. Primary Source: Base your response primarily on the retrieved posts provided with the latest message. Earlier turns in the conversation are context for follow-up questions.
 2. Web Search Fallback: If the retrieved posts do not contain sufficient or clear information to answer the question, use the web search tool to find accurate, up-to-date information. Do not hallucinate or guess.
-3. Grounding & Truthfulness: Synthesize facts strictly from verified context (the posts or search results). If neither provides enough detail, clearly state what cannot be answered.
-4. Attribution: At the end of your response, include an "Sources & Inspiration" section listing the specific posts, authors, or web sources that informed your answer."""
+3. Grounding & Truthfulness: Synthesize facts strictly from verified context (the posts, search results, or earlier turns). If none provides enough detail, clearly state what cannot be answered.
+4. Attribution: At the end of your response, include a "Sources & Inspiration" section listing the specific posts (author + link), or web sources that informed your answer. For a short conversational follow-up that adds no new facts, you may skip it."""
+
+# Upper bounds on what the browser can send back as history — keeps one
+# runaway conversation from turning into an arbitrarily large (and
+# arbitrarily expensive) request.
+MAX_HISTORY_MESSAGES = 20
+MAX_MESSAGE_CHARS = 20000
 
 
-def ui_answer_response(client: anthropic.Anthropic, ui_user_query: str) -> list:
-    retrieved_posts = bq_retrieval_query.vector_search_call(ui_user_query)
+def clean_history(raw: Any) -> List[Dict[str, str]]:
+    """Validate the client-supplied history: alternating user/assistant
+    plain-text turns, starting with user, trimmed to the most recent turns."""
+    if not isinstance(raw, list):
+        return []
+    msgs = []
+    for m in raw:
+        if not isinstance(m, dict):
+            continue
+        role, content = m.get("role"), m.get("content")
+        if role not in ("user", "assistant") or not isinstance(content, str) or not content.strip():
+            continue
+        if msgs and msgs[-1]["role"] == role:
+            continue  # drop anything that breaks alternation
+        msgs.append({"role": role, "content": content[:MAX_MESSAGE_CHARS]})
+    # Must end on an assistant turn (the new question is the next user turn)
+    if msgs and msgs[-1]["role"] == "user":
+        msgs.pop()
+    msgs = msgs[-MAX_HISTORY_MESSAGES:]
+    if msgs and msgs[0]["role"] == "assistant":
+        msgs = msgs[1:]
+    return msgs
 
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=2000,
-        system=SYSTEM_PROMPT,
-        # medium effort: this is a chat-style Q&A workload, not long-horizon
-        # agentic work — the default (high) was adding real latency for
-        # thinking depth this task doesn't need.
-        output_config={"effort": "medium"},
-        messages=[{
-            "role": "user",
-            "content": f"User Query: {ui_user_query}; User Content: {retrieved_posts}"
-        }],
-        tools=[{
-            "type": "web_search_20260209",
-            "name": "web_search",
-            "max_uses": 3,
-        }]
-    )
 
-    if response.stop_reason == "refusal":
-        return [{"type": "error", "error": "The model declined to answer this question."}]
+def _format_posts(posts: List[Dict[str, Any]]) -> str:
+    if not posts:
+        return "(no matching posts found in the archive)"
+    lines = []
+    for i, p in enumerate(posts, 1):
+        lines.append(
+            f"[{i}] {p.get('author_name') or 'Unknown author'} "
+            f"({p.get('post_date') or 'date unknown'}) — {p.get('post_url')}\n"
+            f"{p.get('post_text') or ''}"
+        )
+    return "\n\n".join(lines)
 
-    # A turn that uses web search comes back as several interleaved blocks —
-    # text, then a search call, then more text continuing the same answer.
-    # Collect everything first and merge into one answer + one source list,
-    # rather than rendering each block as its own separate bubble in the UI.
-    text_parts = []
-    sources = []
-    seen_urls = set()
-    errors = []
 
-    for block in response.content:
-        if block.type == "text":
-            text_parts.append(block.text)
-        elif block.type == "web_search_tool_result":
+_SENTENCE_END = re.compile(r"([.!?:]|\*\*)$")
+
+
+def _block_separator(prev: str, nxt: str) -> str:
+    """What to put between two consecutive text blocks of one answer.
+
+    A turn's answer arrives as many text blocks (split around thinking, web
+    searches, and sometimes mid-sentence). Usually each block carries its own
+    whitespace and they concatenate cleanly — but sometimes a boundary falls
+    exactly where a space or paragraph break should be, e.g. a `**Heading**`
+    block followed directly by `Body text...`. Only intervene when the two
+    would otherwise glue together.
+    """
+    if not prev or prev[-1].isspace() or nxt[0].isspace():
+        return ""
+    if nxt[0] in ",.;:!?)]}…'\"’”—–":
+        return ""  # continuing the same sentence
+    if _SENTENCE_END.search(prev) and (nxt[0].isupper() or nxt[0] in "#*-[0123456789"):
+        return "\n\n"  # new sentence/section after a heading or full stop
+    return " "
+
+
+def stream_answer(
+    client: anthropic.Anthropic, question: str, history: List[Dict[str, str]]
+) -> Iterator[Dict[str, Any]]:
+    """Yield events: {"type": "status"|"delta"|"sources"|"error", ...}."""
+    yield {"type": "status", "text": "Searching your archive…"}
+
+    # Follow-ups like "tell me more about the second one" embed poorly on
+    # their own, so retrieve on the previous question + this one.
+    prev_questions = [m["content"] for m in history if m["role"] == "user"]
+    retrieval_query = f"{prev_questions[-1]}\n{question}" if prev_questions else question
+    posts = bq_retrieval_query.vector_search_call(retrieval_query)
+
+    messages: List[Dict[str, Any]] = list(history) + [{
+        "role": "user",
+        "content": (
+            f"<retrieved_posts>\n{_format_posts(posts)}\n</retrieved_posts>\n\n"
+            f"Question: {question}"
+        ),
+    }]
+
+    yield {"type": "status", "text": "Writing answer…"}
+
+    emitted_text = ""
+    new_block = False
+    final = None
+    all_blocks: List[Any] = []  # every block across pause_turn continuations
+
+    # The server-side web search loop can return stop_reason "pause_turn"
+    # when it needs more iterations — re-send to let it continue (bounded).
+    for _ in range(3):
+        with client.beta.messages.stream(
+            model=MODEL,
+            max_tokens=16000,
+            system=SYSTEM_PROMPT,
+            # medium effort: chat-style Q&A, not long-horizon agentic work.
+            output_config={"effort": "medium"},
+            # On a safety-classifier decline, re-run on a fallback model
+            # inside the same call instead of just stopping.
+            betas=["server-side-fallback-2026-07-01"],
+            fallbacks="default",
+            messages=messages,
+            tools=[{
+                "type": "web_search_20260209",
+                "name": "web_search",
+                "max_uses": 3,
+            }],
+        ) as stream:
+            for event in stream:
+                if event.type == "content_block_start":
+                    btype = event.content_block.type
+                    if btype == "server_tool_use":
+                        yield {"type": "status", "text": "Searching the web…"}
+                    elif btype == "text":
+                        new_block = True
+                elif event.type == "text" and event.text:
+                    if new_block:
+                        sep = _block_separator(emitted_text, event.text)
+                        if sep:
+                            emitted_text += sep
+                            yield {"type": "delta", "text": sep}
+                        new_block = False
+                    emitted_text += event.text
+                    yield {"type": "delta", "text": event.text}
+            final = stream.get_final_message()
+        all_blocks.extend(final.content)
+
+        if final.stop_reason != "pause_turn":
+            break
+        messages = messages + [{"role": "assistant", "content": final.content}]
+
+    if final is not None and final.stop_reason == "refusal":
+        yield {"type": "error", "error": "The model declined to answer this question."}
+        return
+
+    # Sources come from the completed message(s) — web search result blocks
+    # arrive whole, so there's nothing to gain by streaming them.
+    sources, seen = [], set()
+    for block in all_blocks:
+        if block.type == "web_search_tool_result":
             if isinstance(block.content, list):
                 for r in block.content:
-                    if r.url not in seen_urls:
-                        seen_urls.add(r.url)
+                    if r.url not in seen:
+                        seen.add(r.url)
                         sources.append({"url": r.url, "title": r.title})
             else:
-                # Error case: content is a single object (e.g. {error_code: "..."}),
-                # not the list of results a success returns.
-                errors.append(getattr(block.content, "error_code", str(block.content)))
-
-    results = []
-    if text_parts:
-        results.append({"type": "text", "text": "\n\n".join(text_parts)})
+                # Error case: content is a single error object, not a list.
+                yield {"type": "error",
+                       "error": f"Web search failed: {getattr(block.content, 'error_code', block.content)}"}
     if sources:
-        results.append({"type": "sources", "sources": sources})
-    for e in errors:
-        results.append({"type": "error", "error": e})
-
-    return results
+        yield {"type": "sources", "sources": sources}

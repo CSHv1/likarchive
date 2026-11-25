@@ -404,18 +404,25 @@
     }
     .date-clear-link:hover { color: var(--blue-dark); text-decoration: underline; }
 
-    /* Ask Archive panel */
+    /* Ask Archive panel — chat layout: scrolling thread + composer pinned below */
     #ask-panel {
       flex: 1;
-      overflow-y: auto;
-      padding: 32px 24px 24px;
+      min-height: 0;
       display: none;
+      flex-direction: column;
     }
-    #ask-panel.visible { display: block; }
+    #ask-panel.visible { display: flex; }
+
+    #ask-thread {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 28px 24px 12px;
+    }
 
     .ask-intro {
       max-width: 640px;
-      margin: 0 auto 18px;
+      margin: 24px auto 18px;
       text-align: center;
     }
     .ask-intro strong {
@@ -427,53 +434,115 @@
     }
     .ask-intro span { font-size: 12.5px; color: var(--text-muted); }
 
+    .ask-turn { max-width: 640px; margin: 0 auto 18px; }
+
+    .ask-user-bubble {
+      width: fit-content;
+      max-width: 85%;
+      margin: 0 0 10px auto;
+      padding: 9px 14px;
+      background: var(--blue);
+      color: #fff;
+      border-radius: 14px 14px 4px 14px;
+      font-size: 13.5px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .ask-status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12.5px;
+      color: var(--text-muted);
+    }
+    .ask-status::before {
+      content: '';
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--blue);
+      animation: ask-pulse 1s ease-in-out infinite alternate;
+    }
+    @keyframes ask-pulse { from { opacity: 0.25; } to { opacity: 1; } }
+    .ask-status[hidden] { display: none; }  /* else display:flex above beats the hidden attribute */
+    .ask-body:not(:empty) + .ask-status { margin-top: 12px; }
+    .ask-stopped { font-size: 11.5px; color: var(--text-muted); margin-top: 8px; }
+
+    .ask-composer {
+      flex-shrink: 0;
+      border-top: 1px solid var(--border);
+      background: var(--surface);
+      padding: 12px 24px calc(10px + env(safe-area-inset-bottom, 0px));
+    }
     .ask-box {
       display: flex;
-      flex-direction: column;
-      gap: 10px;
+      align-items: flex-end;
+      gap: 8px;
       max-width: 640px;
-      margin: 0 auto 20px;
+      margin: 0 auto;
     }
 
     #ask-input {
-      width: 100%;
-      min-height: 72px;
-      padding: 11px 14px;
+      flex: 1;
+      min-width: 0;
+      max-height: 200px;
+      padding: 10px 14px;
       border: 1.5px solid var(--border);
       border-radius: 10px;
       font-size: 13.5px;
+      line-height: 1.45;
       font-family: inherit;
       color: var(--text-1);
       background: var(--surface);
       outline: none;
-      resize: vertical;
+      resize: none;
       transition: border-color 0.15s;
     }
     #ask-input::placeholder { color: var(--text-muted); }
     #ask-input:focus { border-color: var(--blue); }
 
     #ask-submit {
-      align-self: flex-end;
-      padding: 8px 20px;
+      flex-shrink: 0;
+      padding: 10px 18px;
       background: var(--blue);
       border: none;
-      border-radius: 8px;
+      border-radius: 10px;
       font-size: 13px;
       font-weight: 600;
       color: #fff;
       cursor: pointer;
       transition: background 0.15s;
     }
-    #ask-submit:hover:not(:disabled) { background: var(--blue-dark); }
-    #ask-submit:disabled { opacity: 0.6; cursor: default; }
+    /* hover only on real pointers — touch browsers leave :hover stuck after a tap */
+    @media (hover: hover) { #ask-submit:hover { background: var(--blue-dark); } }
+    #ask-submit.stop { background: var(--text-2); }
+
+    .ask-composer-foot {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      max-width: 640px;
+      margin: 6px auto 0;
+      font-size: 11.5px;
+      color: var(--text-muted);
+    }
+    #ask-new {
+      background: none;
+      border: none;
+      padding: 0;
+      font: inherit;
+      color: var(--blue);
+      cursor: pointer;
+    }
+    #ask-new:hover { text-decoration: underline; }
 
     .ask-answer {
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: var(--radius-card);
       padding: 16px 18px;
-      margin: 0 auto 14px;
-      max-width: 640px;
+      margin: 0 0 10px;
       word-break: break-word;
       line-height: 1.6;
       font-size: 13.5px;
@@ -513,8 +582,7 @@
     }
 
     .ask-sources {
-      max-width: 640px;
-      margin: 0 auto 14px;
+      margin: 0 0 10px;
       padding: 14px 18px;
       background: var(--surface-2);
       border-radius: var(--radius-card);
@@ -537,8 +605,7 @@
     .ask-source-link:hover { color: var(--blue-dark); text-decoration: underline; }
 
     .ask-error {
-      max-width: 640px;
-      margin: 0 auto 14px;
+      margin: 0 0 10px;
       color: #8A1F1F;
       background: #FDECEC;
       border: 1px solid #F5C6C6;
@@ -640,10 +707,11 @@
 
       #chips { padding: 8px 14px; }
 
-      #ask-panel { padding: 22px 16px 20px; }
+      #ask-thread { padding: 16px 14px 8px; }
+      .ask-composer { padding-left: 14px; padding-right: 14px; }
       .ask-intro strong { font-size: 15.5px; }
-      #ask-input { font-size: 16px; min-height: 100px; }
-      #ask-submit { width: 100%; align-self: stretch; padding: 11px 20px; }
+      #ask-input { font-size: 16px; }
+      .ask-hint { display: none; }
     }
   </style>
 </head>
@@ -732,15 +800,23 @@
   <div id="content"><div class="spinner">Loading…</div></div>
 
   <div id="ask-panel">
-    <div class="ask-intro">
-      <strong>Ask Your Archive</strong>
-      <span>Ask a question grounded in your saved posts — falls back to web search if the archive doesn't have the answer.</span>
+    <div id="ask-thread">
+      <div class="ask-intro" id="ask-intro">
+        <strong>Ask Your Archive</strong>
+        <span>Chat with your saved posts — falls back to web search if the archive doesn't have the answer. Ask follow-ups; it remembers the conversation.</span>
+      </div>
+      <div id="ask-messages"></div>
     </div>
-    <div class="ask-box">
-      <textarea id="ask-input" placeholder="e.g. What have people been saying about agentic AI workflows?"></textarea>
-      <button id="ask-submit">Ask</button>
+    <div class="ask-composer">
+      <div class="ask-box">
+        <textarea id="ask-input" rows="1" placeholder="e.g. What have people been saying about agentic AI workflows?"></textarea>
+        <button id="ask-submit">Send</button>
+      </div>
+      <div class="ask-composer-foot">
+        <button id="ask-new">New chat</button>
+        <span class="ask-hint">Enter to send · Shift+Enter for a new line</span>
+      </div>
     </div>
-    <div id="ask-result"></div>
   </div>
 </main>
 
@@ -871,10 +947,18 @@ function initApp() {
   // "Ask Archive" nav item
   document.getElementById('nav-ask').addEventListener('click', showAskPanel);
   document.getElementById('ask-submit').addEventListener('click', submitAsk);
-  document.getElementById('ask-input').addEventListener('keydown', e => {
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+  document.getElementById('ask-new').addEventListener('click', newAskChat);
+  const askInput = document.getElementById('ask-input');
+  askInput.addEventListener('input', () => autoGrow(askInput));
+  askInput.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' || e.isComposing) return;
+    // Chat convention: Enter sends, Shift+Enter is a newline. On touch
+    // devices the keyboard's Return should stay a newline (there's a Send
+    // button right there), so only Cmd/Ctrl+Enter sends.
+    const touch = window.matchMedia('(pointer: coarse)').matches;
+    if (e.metaKey || e.ctrlKey || (!e.shiftKey && !touch)) {
       e.preventDefault();
-      submitAsk();
+      if (!ASK.controller) submitAsk();
     }
   });
 
@@ -1166,34 +1250,152 @@ function showAskPanel() {
   document.getElementById('ask-input').focus();
 }
 
+// Conversation state. The server is stateless — the full history is sent
+// with every question (plain text only: retrieved posts are re-fetched per
+// turn rather than carried forward).
+const ASK = { history: [], controller: null };
+
+function autoGrow(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 200) + 'px';
+}
+
+function askNearBottom() {
+  const t = document.getElementById('ask-thread');
+  return t.scrollHeight - t.scrollTop - t.clientHeight < 120;
+}
+
+function askScrollToBottom() {
+  const t = document.getElementById('ask-thread');
+  t.scrollTop = t.scrollHeight;
+}
+
+function setAskBusy(busy) {
+  const btn = document.getElementById('ask-submit');
+  btn.textContent = busy ? 'Stop' : 'Send';
+  btn.classList.toggle('stop', busy);
+}
+
+function newAskChat() {
+  if (ASK.controller) ASK.controller.abort();
+  ASK.history = [];
+  document.getElementById('ask-messages').innerHTML = '';
+  document.getElementById('ask-intro').hidden = false;
+  document.getElementById('ask-input').focus();
+}
+
 async function submitAsk() {
+  // While an answer is streaming, the button is "Stop"
+  if (ASK.controller) { ASK.controller.abort(); return; }
+
   const input = document.getElementById('ask-input');
   const question = input.value.trim();
   if (!question) return;
+  input.value = '';
+  autoGrow(input);
+  document.getElementById('ask-intro').hidden = true;
 
-  const resultEl = document.getElementById('ask-result');
-  const btn = document.getElementById('ask-submit');
-  btn.disabled = true;
-  btn.textContent = 'Thinking…';
-  resultEl.innerHTML = '<div class="spinner">Searching your archive…</div>';
+  const turn = document.createElement('div');
+  turn.className = 'ask-turn';
+  turn.innerHTML = `<div class="ask-user-bubble">${esc(question)}</div>
+    <div class="ask-answer"><div class="ask-body"></div><div class="ask-status">Searching your archive…</div></div>`;
+  document.getElementById('ask-messages').appendChild(turn);
+  askScrollToBottom();
+
+  const answerEl = turn.querySelector('.ask-answer');
+  const statusEl = turn.querySelector('.ask-status');
+  const bodyEl = turn.querySelector('.ask-body');
+  const addAfterAnswer = html => turn.insertAdjacentHTML('beforeend', html);
+
+  let text = '';
+  let renderQueued = false;
+  const render = () => {
+    renderQueued = false;
+    const stick = askNearBottom();
+    bodyEl.innerHTML = renderMarkdown(text);
+    if (stick) askScrollToBottom();
+  };
+
+  const handle = ev => {
+    if (ev.type === 'status') {
+      statusEl.textContent = ev.text;
+      statusEl.hidden = false;
+    } else if (ev.type === 'delta') {
+      text += ev.text;
+      statusEl.hidden = true;
+      // Re-render Markdown at most once per frame, not once per token
+      if (!renderQueued) { renderQueued = true; requestAnimationFrame(render); }
+    } else if (ev.type === 'sources' && ev.sources && ev.sources.length) {
+      addAfterAnswer(`<div class="ask-sources">
+        <div class="ask-sources-title">Web sources</div>
+        ${ev.sources.map(s =>
+          `<a class="ask-source-link" href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.title || s.url)}</a>`
+        ).join('')}
+      </div>`);
+    } else if (ev.type === 'error') {
+      addAfterAnswer(`<div class="ask-error">${esc(String(ev.error))}</div>`);
+    }
+  };
+
+  const history = ASK.history.slice();
+  ASK.controller = new AbortController();
+  setAskBusy(true);
+  let stopped = false;
 
   try {
     const res = await authFetch('/api/ask', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question }),
+      body: JSON.stringify({ question, history }),
+      signal: ASK.controller.signal,
     });
-    const data = await res.json();
-    if (!res.ok) {
-      resultEl.innerHTML = `<div class="ask-error">${esc(data.error || 'Something went wrong.')}</div>`;
-      return;
+    if (!res.ok || !res.body) {
+      let msg = '';
+      try { msg = (await res.json()).error; } catch (_) {}
+      throw new Error(msg || `Request failed (${res.status})`);
     }
-    renderAskResults(data.results || []);
+    // Parse the Server-Sent Events stream: events are separated by a blank
+    // line, each carrying one `data: {json}` line.
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        const raw = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        const data = raw.split('\n')
+          .filter(l => l.startsWith('data:'))
+          .map(l => l.slice(5).trim())
+          .join('');
+        if (data) handle(JSON.parse(data));
+      }
+    }
   } catch (err) {
-    resultEl.innerHTML = `<div class="ask-error">Network error: ${esc(err.message)}</div>`;
+    if (err.name === 'AbortError') {
+      stopped = true;
+    } else {
+      addAfterAnswer(`<div class="ask-error">${esc(err.message || 'Something went wrong.')}</div>`);
+    }
   } finally {
-    btn.disabled = false;
-    btn.textContent = 'Ask';
+    ASK.controller = null;
+    setAskBusy(false);
+    statusEl.hidden = true;
+    render();
+    if (!text) answerEl.remove();
+    if (stopped) {
+      const note = '<div class="ask-stopped">Stopped</div>';
+      if (text) bodyEl.insertAdjacentHTML('afterend', note); else addAfterAnswer(note);
+    }
+  }
+
+  // Only turns that produced an answer join the history (keeps the
+  // user/assistant alternation the API requires)
+  if (text) {
+    ASK.history.push({ role: 'user', content: question }, { role: 'assistant', content: text });
   }
 }
 
@@ -1205,26 +1407,6 @@ function renderMarkdown(text) {
     return DOMPurify.sanitize(marked.parse(text));
   }
   return `<p>${esc(text)}</p>`; // fallback if the CDN scripts failed to load
-}
-
-function renderAskResults(blocks) {
-  const resultEl = document.getElementById('ask-result');
-  let html = '';
-  for (const block of blocks) {
-    if (block.type === 'text') {
-      html += `<div class="ask-answer">${renderMarkdown(block.text)}</div>`;
-    } else if (block.type === 'sources' && block.sources && block.sources.length) {
-      html += `<div class="ask-sources">
-        <div class="ask-sources-title">Web sources</div>
-        ${block.sources.map(s =>
-          `<a class="ask-source-link" href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.title || s.url)}</a>`
-        ).join('')}
-      </div>`;
-    } else if (block.type === 'error') {
-      html += `<div class="ask-error">${esc(String(block.error))}</div>`;
-    }
-  }
-  resultEl.innerHTML = html || '<div class="empty"><strong>No answer returned</strong></div>';
 }
 
 // ── Utils ─────────────────────────────────────────────────────────────────

@@ -65,4 +65,10 @@ jobs:
           gcloud run services update likarchive-ui \
             --project="${PROJECT_ID}" \
             --region="${REGION}" \
-            --image="${IMAGE_UI}:${{ github.sha }}"
+            --image="${IMAGE_UI}:${{ github.sha }}" \
+            --command="" \
+            --args=""
+          # --command=""/--args="" reset any service-level command override so
+          # Dockerfile.ui's CMD is the single source of truth. A leftover
+          # Phase 6 override (`gunicorn --bind 0.0.0.0:8080 app:app`) had been
+          # silently shadowing it, so the --timeout 170 fix never reached prod.
