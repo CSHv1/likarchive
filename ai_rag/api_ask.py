@@ -19,7 +19,19 @@ import anthropic
 
 from ai_rag import bq_retrieval_query
 
-MODEL = "claude-opus-5"
+# Measured side-by-side on 2026-11-25 (same questions, medium effort):
+# Opus 5.5 was ~40% faster on archive questions and ~30% cheaper per answer
+# than claude-opus-5, at equal or better quality.
+MODEL = "claude-opus-5-5"
+WEB_SEARCH_MAX_USES = 3
+# Deliberately the basic web search tool, not the newer web_search_20260209.
+# With the newer one (search runs inside a hidden code-execution filtering
+# step), Opus 5.5 repeatedly used every search it was allowed, then reported
+# it "could only run one search" and answered from stale memory, in 3 of 4
+# test runs, even with max_uses raised to 5. With this basic tool it gave
+# correct, current, well-sourced answers in ~20s in both runs (vs ~30s).
+# Re-test before changing it.
+WEB_SEARCH_TOOL = "web_search_20250305"
 
 SYSTEM_PROMPT = """You are an AI assistant in an ongoing conversation with the user about their personal archive of saved LinkedIn posts.
 
@@ -137,9 +149,9 @@ def stream_answer(
             fallbacks="default",
             messages=messages,
             tools=[{
-                "type": "web_search_20260209",
+                "type": WEB_SEARCH_TOOL,
                 "name": "web_search",
-                "max_uses": 3,
+                "max_uses": WEB_SEARCH_MAX_USES,
             }],
         ) as stream:
             for event in stream:

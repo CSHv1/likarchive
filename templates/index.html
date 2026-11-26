@@ -101,6 +101,47 @@
     }
     .sb-nav-item.disabled:hover { background: none; color: var(--text-muted); }
 
+    /* Saved Ask Archive chats, listed under the nav item */
+    #ask-chats { max-height: 236px; overflow-y: auto; }
+    .ask-chat-item {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 5px 10px 5px 30px;
+      font-size: 12.5px;
+      color: var(--text-2);
+      cursor: pointer;
+      user-select: none;
+    }
+    .ask-chat-item:hover { background: var(--blue-tint); color: var(--blue); }
+    .ask-chat-item.active { color: var(--blue); font-weight: 600; }
+    .ask-chat-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ask-chat-del {
+      flex-shrink: 0;
+      width: 22px; height: 22px;
+      border: none;
+      background: none;
+      border-radius: 4px;
+      font-size: 15px;
+      line-height: 1;
+      color: var(--text-muted);
+      cursor: pointer;
+      visibility: hidden;
+    }
+    .ask-chat-item:hover .ask-chat-del, .ask-chat-item.active .ask-chat-del { visibility: visible; }
+    .ask-chat-del:hover { background: var(--surface-2); color: var(--text-1); }
+    .ask-chat-del.confirm {
+      width: auto;
+      padding: 0 6px;
+      font-size: 11px;
+      font-weight: 600;
+      color: #8A1F1F;
+      background: #FDECEC;
+      visibility: visible;
+    }
+    /* touch screens have no hover — always show the delete button */
+    @media (hover: none) { .ask-chat-del { visibility: visible; } }
+
     .sb-count { margin-left: auto; font-size: 11.5px; color: var(--text-muted); font-weight: 400; }
 
     .sb-section { border-top: 1px solid var(--divider); padding-top: 10px; margin-top: 4px; }
@@ -740,6 +781,7 @@
     </div>
 
     <div class="sb-nav-item" id="nav-ask">Ask Archive</div>
+    <div id="ask-chats"></div>
 
     <div class="sb-section">
       <div class="sb-section-head" data-target="tags-list">
@@ -948,6 +990,20 @@ function initApp() {
   document.getElementById('nav-ask').addEventListener('click', showAskPanel);
   document.getElementById('ask-submit').addEventListener('click', submitAsk);
   document.getElementById('ask-new').addEventListener('click', newAskChat);
+  document.getElementById('ask-chats').addEventListener('click', e => {
+    const del = e.target.closest('[data-del]');
+    if (del) {
+      // Two taps to delete: the first turns × into "Delete?" for 3 seconds
+      if (del.classList.contains('confirm')) { deleteChat(del.dataset.del); return; }
+      del.classList.add('confirm');
+      del.textContent = 'Delete?';
+      setTimeout(() => { del.classList.remove('confirm'); del.textContent = '×'; }, 3000);
+      return;
+    }
+    const item = e.target.closest('.ask-chat-item');
+    if (item) openChat(item.dataset.id);
+  });
+  loadAskChats();
   const askInput = document.getElementById('ask-input');
   askInput.addEventListener('input', () => autoGrow(askInput));
   askInput.addEventListener('keydown', e => {
@@ -1250,10 +1306,100 @@ function showAskPanel() {
   document.getElementById('ask-input').focus();
 }
 
-// Conversation state. The server is stateless — the full history is sent
-// with every question (plain text only: retrieved posts are re-fetched per
-// turn rather than carried forward).
-const ASK = { history: [], controller: null };
+// ── Ask Archive chats ────────────────────────────────────────────────────
+// Chats are saved in this browser's localStorage only, under a key per Clerk
+// user (so two accounts on one browser never see each other's chats). The
+// server stays stateless: the open chat's plain-text history is sent along
+// with each new question, and nothing is stored server-side.
+// A saved chat: { id, title, updated, turns: [{ q, a, sources, errors, stopped }] }
+const ASK = { chats: [], currentId: null, controller: null };
+const ASK_MAX_CHATS = 30;
+
+function askStoreKey() {
+  return `likarchive.askChats.v1.${window.Clerk?.user?.id || 'anon'}`;
+}
+
+function loadAskChats() {
+  try {
+    const data = JSON.parse(localStorage.getItem(askStoreKey()) || 'null');
+    if (data && Array.isArray(data.chats)) {
+      ASK.chats = data.chats;
+      ASK.currentId = data.currentId || null;
+    }
+  } catch (_) { /* storage blocked or corrupt — start empty */ }
+  if (!ASK.chats.some(c => c.id === ASK.currentId)) ASK.currentId = null;
+  renderChatList();
+  renderCurrentChat();
+}
+
+function saveAskChats() {
+  ASK.chats.sort((a, b) => b.updated - a.updated);
+  ASK.chats = ASK.chats.slice(0, ASK_MAX_CHATS);
+  // If storage is full, drop the oldest chats until it fits
+  for (let n = ASK.chats.length; n >= 0; n--) {
+    try {
+      localStorage.setItem(askStoreKey(),
+        JSON.stringify({ currentId: ASK.currentId, chats: ASK.chats.slice(0, n) }));
+      ASK.chats = ASK.chats.slice(0, n);
+      return;
+    } catch (_) { /* quota exceeded (or storage blocked) — try with fewer */ }
+  }
+}
+
+function currentChat() {
+  return ASK.chats.find(c => c.id === ASK.currentId) || null;
+}
+
+function chatHistory(chat) {
+  // Only turns that produced an answer — keeps the user/assistant
+  // alternation the API requires
+  return chat.turns.filter(t => t.a).flatMap(t => [
+    { role: 'user', content: t.q },
+    { role: 'assistant', content: t.a },
+  ]);
+}
+
+function newChatId() {
+  return window.crypto?.randomUUID?.() || Date.now().toString(36) + Math.random().toString(36).slice(2);
+}
+
+function renderChatList() {
+  const el = document.getElementById('ask-chats');
+  el.innerHTML = ASK.chats.map(c => `
+    <div class="ask-chat-item${c.id === ASK.currentId ? ' active' : ''}" data-id="${esc(c.id)}" title="${esc(c.title)}">
+      <span class="ask-chat-title">${esc(c.title)}</span>
+      <button class="ask-chat-del" data-del="${esc(c.id)}" aria-label="Delete chat">×</button>
+    </div>`).join('');
+}
+
+function openChat(id) {
+  if (ASK.controller) ASK.controller.abort();
+  ASK.currentId = id;
+  saveAskChats();
+  renderChatList();
+  renderCurrentChat();
+  showAskPanel();
+}
+
+function deleteChat(id) {
+  if (id === ASK.currentId) {
+    if (ASK.controller) ASK.controller.abort();
+    ASK.currentId = null;
+  }
+  ASK.chats = ASK.chats.filter(c => c.id !== id);
+  saveAskChats();
+  renderChatList();
+  if (!ASK.currentId) renderCurrentChat();
+}
+
+function newAskChat() {
+  if (ASK.controller) ASK.controller.abort();
+  ASK.currentId = null;
+  saveAskChats();
+  renderChatList();
+  renderCurrentChat();
+  document.getElementById('ask-input').focus();
+}
 
 function autoGrow(el) {
   el.style.height = 'auto';
@@ -1276,12 +1422,44 @@ function setAskBusy(busy) {
   btn.classList.toggle('stop', busy);
 }
 
-function newAskChat() {
-  if (ASK.controller) ASK.controller.abort();
-  ASK.history = [];
+function sourcesHtml(sources) {
+  return `<div class="ask-sources">
+    <div class="ask-sources-title">Web sources</div>
+    ${sources.map(s =>
+      `<a class="ask-source-link" href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.title || s.url)}</a>`
+    ).join('')}
+  </div>`;
+}
+
+const STOPPED_HTML = '<div class="ask-stopped">Stopped</div>';
+
+function buildTurnEl(question) {
+  const turn = document.createElement('div');
+  turn.className = 'ask-turn';
+  turn.innerHTML = `<div class="ask-user-bubble">${esc(question)}</div>
+    <div class="ask-answer"><div class="ask-body"></div><div class="ask-status">Searching your archive…</div></div>`;
+  document.getElementById('ask-messages').appendChild(turn);
+  return turn;
+}
+
+function renderCurrentChat() {
+  const chat = currentChat();
   document.getElementById('ask-messages').innerHTML = '';
-  document.getElementById('ask-intro').hidden = false;
-  document.getElementById('ask-input').focus();
+  document.getElementById('ask-intro').hidden = !!(chat && chat.turns.length);
+  if (!chat) return;
+  for (const t of chat.turns) {
+    const turn = buildTurnEl(t.q);
+    turn.querySelector('.ask-status').hidden = true;
+    if (t.a) turn.querySelector('.ask-body').innerHTML = renderMarkdown(t.a);
+    else turn.querySelector('.ask-answer').remove();
+    if (t.sources && t.sources.length) turn.insertAdjacentHTML('beforeend', sourcesHtml(t.sources));
+    for (const e of t.errors || []) turn.insertAdjacentHTML('beforeend', `<div class="ask-error">${esc(String(e))}</div>`);
+    if (t.stopped) {
+      if (t.a) turn.querySelector('.ask-body').insertAdjacentHTML('afterend', STOPPED_HTML);
+      else turn.insertAdjacentHTML('beforeend', STOPPED_HTML);
+    }
+  }
+  askScrollToBottom();
 }
 
 async function submitAsk() {
@@ -1295,13 +1473,18 @@ async function submitAsk() {
   autoGrow(input);
   document.getElementById('ask-intro').hidden = true;
 
-  const turn = document.createElement('div');
-  turn.className = 'ask-turn';
-  turn.innerHTML = `<div class="ask-user-bubble">${esc(question)}</div>
-    <div class="ask-answer"><div class="ask-body"></div><div class="ask-status">Searching your archive…</div></div>`;
-  document.getElementById('ask-messages').appendChild(turn);
-  askScrollToBottom();
+  let chat = currentChat();
+  if (!chat) {
+    chat = { id: newChatId(), title: question.slice(0, 80), updated: Date.now(), turns: [] };
+    ASK.chats.unshift(chat);
+    ASK.currentId = chat.id;
+    renderChatList();
+  }
+  const history = chatHistory(chat);
+  const record = { q: question, a: '', sources: [], errors: [], stopped: false };
 
+  const turn = buildTurnEl(question);
+  askScrollToBottom();
   const answerEl = turn.querySelector('.ask-answer');
   const statusEl = turn.querySelector('.ask-status');
   const bodyEl = turn.querySelector('.ask-body');
@@ -1326,21 +1509,16 @@ async function submitAsk() {
       // Re-render Markdown at most once per frame, not once per token
       if (!renderQueued) { renderQueued = true; requestAnimationFrame(render); }
     } else if (ev.type === 'sources' && ev.sources && ev.sources.length) {
-      addAfterAnswer(`<div class="ask-sources">
-        <div class="ask-sources-title">Web sources</div>
-        ${ev.sources.map(s =>
-          `<a class="ask-source-link" href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.title || s.url)}</a>`
-        ).join('')}
-      </div>`);
+      record.sources = ev.sources;
+      addAfterAnswer(sourcesHtml(ev.sources));
     } else if (ev.type === 'error') {
+      record.errors.push(String(ev.error));
       addAfterAnswer(`<div class="ask-error">${esc(String(ev.error))}</div>`);
     }
   };
 
-  const history = ASK.history.slice();
   ASK.controller = new AbortController();
   setAskBusy(true);
-  let stopped = false;
 
   try {
     const res = await authFetch('/api/ask', {
@@ -1376,9 +1554,11 @@ async function submitAsk() {
     }
   } catch (err) {
     if (err.name === 'AbortError') {
-      stopped = true;
+      record.stopped = true;
     } else {
-      addAfterAnswer(`<div class="ask-error">${esc(err.message || 'Something went wrong.')}</div>`);
+      const msg = err.message || 'Something went wrong.';
+      record.errors.push(msg);
+      addAfterAnswer(`<div class="ask-error">${esc(msg)}</div>`);
     }
   } finally {
     ASK.controller = null;
@@ -1386,16 +1566,15 @@ async function submitAsk() {
     statusEl.hidden = true;
     render();
     if (!text) answerEl.remove();
-    if (stopped) {
-      const note = '<div class="ask-stopped">Stopped</div>';
-      if (text) bodyEl.insertAdjacentHTML('afterend', note); else addAfterAnswer(note);
+    if (record.stopped) {
+      if (text) bodyEl.insertAdjacentHTML('afterend', STOPPED_HTML); else addAfterAnswer(STOPPED_HTML);
     }
-  }
-
-  // Only turns that produced an answer join the history (keeps the
-  // user/assistant alternation the API requires)
-  if (text) {
-    ASK.history.push({ role: 'user', content: question }, { role: 'assistant', content: text });
+    // Save the finished turn (even a failed one, so it isn't silently lost)
+    record.a = text;
+    chat.turns.push(record);
+    chat.updated = Date.now();
+    saveAskChats();
+    renderChatList();
   }
 }
 
